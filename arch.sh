@@ -809,7 +809,7 @@ else
 fi
 UNLOCK
 
-    # CORREÇÃO: Substitui placeholder pela UUID real para robustez.
+ # CORREÇÃO: Substitui placeholder pela UUID real para robustez.
     sed -i "s/REPLACE_DATA_UUID/${DATA_UUID}/g" /mnt/usr/local/bin/unlock-data.sh
     chmod 755 /mnt/usr/local/bin/unlock-data.sh
   fi
