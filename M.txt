@@ -1,53 +1,128 @@
-Você é um especialista em Arch Linux e scripts Bash. Modifique o script disponível em https://github.com/macafd/Archmonkey/blob/main/arch.sh adicionando as seguintes funcionalidades SEM REMOVER NENHUMA FUNCIONALIDADE EXISTENTE:
 
-1. **Autodestruição via atalho gráfico (Ctrl+Alt+F12+Ç):**
-   - Instalar automaticamente `xbindkeys` e `zenity` no ambiente gráfico
-   - Criar ~/.xbindkeysrc com o comando de autodestruição
-   - Adicionar entrada no autostart do ambiente gráfico
+# Instalador Seguro para Arch Linux
 
-2. **Firewall automático:**
-   - Instalar e ativar `ufw` por padrão
-   - Configurar políticas padrão: `ufw default deny incoming` e `ufw default allow outgoing`
+Este script automatiza a instalação de um sistema Arch Linux com foco em segurança e robustez, especialmente projetado para proteção contra ataques físicos e para bom desempenho em hardware de baixa potência.
 
-3. **Verificação de integridade:**
-   - Validar assinaturas GPG de todos os pacotes antes da instalação
-   - Verificar checksums dos pacotes críticos
+**AVISO:** Este script é **altamente destrutivo**. Ele apagará completamente todos os dados nos discos especificados sem confirmação adicional após o início. Use por sua conta e risco. Faça backup de todos os dados importantes antes de prosseguir.
 
-4. **Backup criptografado pré-wipe:**
-   - Criar backup criptografado de /etc, /home e logs importantes antes da autodestruição
-   - Usar GPG com senha baseada no hash do sistema
+## Funcionalidades Principais
 
-5. **Logs seguros:**
-   - Armazenar logs de instalação em /var/log/arch_install.log com permissões restritas
-   - Remover dados sensíveis dos logs (senhas, chaves, etc)
+-   **Criptografia de Disco Completa (FDE):** Usa LUKS2 com parâmetros fortes (Argon2id) para criptografar a partição do sistema.
+-   **LVM sobre LUKS:** Permite gerenciamento flexível de partições (root, home, swap) dentro do container criptografado.
+-   **Suporte a UEFI:** Projetado para sistemas modernos com boot UEFI.
+-   **Segurança de Dados Sensíveis:** Limpa automaticamente senhas e chaves da memória e de arquivos temporários.
+-   **Mecanismo de Autodestruição:** Implementa um comando (`crypto-destroy`) que, quando executado com uma senha de pânico, torna os dados criptografados permanentemente inacessíveis ao apagar os cabeçalhos LUKS.
+-   **Criptografia Dupla (Opcional):** Suporte para um segundo disco de dados, também criptografado, que é desbloqueado sob demanda com um PIN/senha separado.
+-   **Robustez:** Usa UUIDs para identificar discos e partições, evitando problemas se a ordem dos dispositivos mudar.
+-   **Validação e Segurança:** O script realiza várias verificações (dependências, variáveis, conectividade) antes de iniciar qualquer operação destrutiva.
 
-6. **Secure Boot:**
-   - Detectar se o sistema tem Secure Boot ativo
-   - Instalar `sbctl` e configurar chaves automaticamente
-   - Assinar o kernel se o Secure Boot estiver habilitado
+## Pré-requisitos
 
-7. **Hardening pós-instalação:**
-   - Aplicar configurações de segurança no /etc/sysctl.d
-   - Configurar opções seguras para kernel modules
-   - Reforçar permissões de arquivos sensíveis
+1.  **Mídia de Instalação do Arch Linux:** Um pendrive ou CD com a imagem de instalação mais recente do Arch.
+2.  **Boot em Modo UEFI:** O computador deve ser iniciado em modo UEFI. O script verificará isso e falhará se não for o caso.
+3.  **Conexão com a Internet:** Necessária para baixar os pacotes. O script verifica a conectividade antes de começar.
+4.  **Dois Discos (Opcional):** Se você planeja usar a funcionalidade de criptografia dupla (`ENABLE_DUAL_ENCRYPTION=1`), precisará de um segundo disco físico.
 
-8. **Notificação remota:**
-   - Enviar webhook/email ao acionar autodestruição (usando curl)
-   - Configurável via variáveis no início do script
+## Configuração
 
-9. **Customização de pacotes:**
-   - Ler lista de pacotes de arquivo externo (pkglist.txt)
-   - Permitir override via variável de ambiente
+O script é configurado através de variáveis de ambiente. Você pode exportá-las no terminal antes de executar o script ou editá-las diretamente no arquivo.
 
-10. **Ajuda integrada:**
-    - Adicionar opção `--help` com documentação detalhada
-    - Incluir validação de argumentos via linha de comando
+| Variável                  | Descrição                                                                                             | Padrão              |
+| ------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------- |
+| `TARGET_DISK`             | **(Obrigatório)** O disco principal onde o sistema será instalado (ex: `/dev/sda`, `/dev/nvme0n1`).     | `/dev/sda`          |
+| `ENABLE_DUAL_ENCRYPTION`  | Defina como `1` para habilitar um segundo disco criptografado para dados.                               | `0`                 |
+| `DATA_DISK`               | O segundo disco para dados, usado se a opção acima for `1`.                                           | `/dev/sdb`          |
+| `ENABLE_AUTO_DESTRUCTION` | Defina como `1` para criar uma senha de pânico que destrói os dados.                                  | `1`                 |
+| `SHOW_PASSWORDS`          | Defina como `1` para ver as senhas enquanto digita. **AVISO:** Isso desativa o log em arquivo.         | `0`                 |
+| `HOSTNAME`                | O nome da máquina na rede.                                                                            | `arch-secure`       |
+| `USERNAME`                | O nome do usuário principal a ser criado.                                                             | `operador`          |
+| `LUKS_PASS`               | Senha para criptografia do disco principal.                                                           | (interativo)        |
+| `ROOT_PASS`               | Senha para o usuário `root`.                                                                          | (interativo)        |
+| `USER_PASS`               | Senha para o usuário principal.                                                                       | (interativo)        |
+| `DESTRUCTION_PASS`        | Senha de pânico para o mecanismo de autodestruição.                                                   | (interativo)        |
+| `PIN_DATA`                | PIN/senha para desbloquear o segundo disco de dados.                                                  | (interativo)        |
+| `REMOTE_BACKUP_URL`       | URL para enviar o log de instalação em caso de falha (ex: `scp://user@host:/path/`).                    | (vazio)             |
 
-CORRIJA ESPECIFICAMENTE:
-- O bug "GREEN: unbound variable" definindo todas variáveis de cor no início
-- Otimize o código existente sem alterar a lógica principal
-- Mantenha compatibilidade com UEFI/Legacy BIOS
-- Garanta que todas as funções originais permaneçam intactas
+## Uso
 
-ENTREGA:
-Retorne APENAS o script bash completo e funcional, sem comentários extras ou explicações.
+### 1. Preparação no Ambiente Live do Arch
+
+Inicie o computador com a mídia de instalação do Arch Linux.
+
+```bash
+# Conecte-se à internet (ex: via Wi-Fi)
+iwctl
+
+# Verifique os nomes dos seus discos
+lsblk
+
+# Baixe o script
+curl -O https://caminho/para/seu/script/install-arch-secure.sh
+chmod +x install-arch-secure.sh
+```
+
+### 2. Execução Interativa (Recomendado)
+
+Esta é a forma mais simples. O script pedirá todas as informações necessárias.
+
+```bash
+# Edite o script para definir TARGET_DISK e outras opções se necessário
+nano install-arch-secure.sh
+
+# Execute o script como root
+./install-arch-secure.sh
+```
+
+### 3. Execução Automatizada (Avançado)
+
+Para uma instalação totalmente não interativa, exporte todas as variáveis de senha e configuração necessárias.
+
+```bash
+# Exemplo para um único disco com autodestruição
+export TARGET_DISK="/dev/nvme0n1"
+export HOSTNAME="meu-laptop"
+export LUKS_PASS="MinhaSenhaLUKSForte123"
+export DESTRUCTION_PASS="SenhaDePanicoDiferente456"
+export ROOT_PASS="SenhaDeRootSegura789"
+export USER_PASS="SenhaDeUsuarioFinal101"
+
+./install-arch-secure.sh
+```
+
+```bash
+# Exemplo com dois discos criptografados
+export TARGET_DISK="/dev/sda"
+export ENABLE_DUAL_ENCRYPTION=1
+export DATA_DISK="/dev/sdb"
+export LUKS_PASS="..."
+export DESTRUCTION_PASS="..."
+export ROOT_PASS="..."
+export USER_PASS="..."
+export PIN_DATA="123456" # PIN para o disco de dados
+
+./install-arch-secure.sh
+```
+
+## Pós-Instalação
+
+Após a reinicialização, você terá um sistema Arch Linux funcional.
+
+-   **Login:** Faça login com o usuário e a senha que você criou.
+-   **Desbloquear Disco de Dados:** Se você habilitou a criptografia dupla, o segundo disco não será montado automaticamente. Para desbloqueá-lo e montá-lo em `/data`, execute:
+    ```bash
+    sudo unlock-data
+    ```
+    Você será solicitado a fornecer o PIN que definiu durante a instalação.
+
+-   **Autodestruição:** Se você habilitou o mecanismo de autodestruição, o comando `crypto-destroy` estará disponível. **USE COM EXTREMO CUIDADO.**
+    ```bash
+    sudo crypto-destroy
+    ```
+    O sistema pedirá a senha de destruição. Se for correta, ele apagará os cabeçalhos das partições LUKS, tornando os dados irrecuperáveis, e desligará o computador.
+
+## Considerações de Segurança
+
+-   **Senhas Fortes:** A segurança do sistema depende da força das suas senhas. Use senhas longas, complexas e únicas.
+-   **Segurança Física:** A criptografia protege contra o acesso aos dados se o dispositivo for roubado. No entanto, um invasor com acesso físico prolongado e recursos pode tentar outros vetores de ataque (keyloggers de hardware, etc.).
+-   **Senha de Destruição:** Não armazene a senha de destruição no próprio computador. Memorize-a ou guarde-a em um local seguro e separado. Ela foi projetada para ser usada sob coação.
+-   **Backup:** Criptografia e autodestruição não substituem backups. Mantenha backups regulares de seus dados importantes em um local seguro.
