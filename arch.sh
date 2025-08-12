@@ -114,7 +114,7 @@ mask_secret() {
 display_passwords_for_confirmation() {
   echo
   echo "=================================================="
-  echo "${GREEN}CONFIRMAÇÃO DE SENHAS:${NC}"
+  echo -e "${GREEN}CONFIRMAÇÃO DE SENHAS:${NC}"
   echo "=================================================="
   echo "Senha LUKS (principal): $(mask_secret "$LUKS_PASS")"
   if [[ "$ENABLE_AUTO_DESTRUCTION" -eq 1 ]]; then
@@ -290,19 +290,19 @@ validate_environment() {
   check_memory_for_pbkdf
   [[ -d /sys/firmware/efi/efivars ]] || fatal "Sistema não iniciado em modo UEFI."
   [[ -b "$TARGET_DISK" ]] || fatal "TARGET_DISK $TARGET_DISK não encontrado."
-  if [[ "$ENABLE_DUAL_ENCRYPTION" -eq 1 ]]; then 
+  if [[ "$ENABLE_DUAL_ENCRYPTION" -eq 1 ]]; then
     [[ -b "$DATA_DISK" ]] || fatal "DATA_DISK $DATA_DISK não encontrado."
     [[ "$TARGET_DISK" != "$DATA_DISK" ]] || fatal "TARGET_DISK e DATA_DISK não podem ser o mesmo dispositivo."
   fi
   
   # Verifica se os discos não estão montados
   if mount | grep -q "$TARGET_DISK"; then
-    warn "TARGET_DISK $TARGET_DISK está montado. Desmontando..."
+    warn "TARGET_DISK $TARGET_DISK ou suas partições estão montados. Tentando desmontar..."
     umount -f "${TARGET_DISK}"* 2>/dev/null || true
   fi
   
   if [[ "$ENABLE_DUAL_ENCRYPTION" -eq 1 ]] && mount | grep -q "$DATA_DISK"; then
-    warn "DATA_DISK $DATA_DISK está montado. Desmontando..."
+    warn "DATA_DISK $DATA_DISK ou suas partições estão montados. Tentando desmontar..."
     umount -f "${DATA_DISK}"* 2>/dev/null || true
   fi
   
@@ -395,9 +395,9 @@ partition_devices() {
   sleep 2
   
   sgdisk -n 1:2048:+${EFI_SIZE_MIB}MiB -t 1:ef00 -c 1:"EFI System" \
-         -n 2:0:+${BOOT_SIZE_MIB}MiB  -t 2:8300  -c 2:"Boot" \
-         -n 3:0:0 -t 3:8300 -c 3:"Linux LUKS" \
-         "$TARGET_DISK" || fatal "Falha ao criar partições no $TARGET_DISK"
+       -n 2:0:+${BOOT_SIZE_MIB}MiB  -t 2:8300 -c 2:"Boot" \
+       -n 3:0:0 -t 3:8300 -c 3:"Linux LUKS" \
+       "$TARGET_DISK" || fatal "Falha ao criar partições no $TARGET_DISK"
 
   if [[ "$ENABLE_DUAL_ENCRYPTION" -eq 1 ]]; then
     sgdisk --zap-all "$DATA_DISK" || fatal "Falha ao zerar GPT do $DATA_DISK"
@@ -460,10 +460,10 @@ setup_encryption_and_lvm() {
   # Formata LUKS lendo a senha via stdin
   info "Formatando LUKS (TARGET_DISK)..."
   if ! printf '%s' "$LUKS_PASS" | cryptsetup luksFormat --type luks2 --cipher "$LUKS_CIPHER" --key-size "$LUKS_KEY_SIZE" \
-       --hash sha512 --pbkdf "$LUKS_KDF" --pbkdf-parallel "$PBKDF_PARALLEL" --pbkdf-memory "$LUKS_PBKDF_MEM" \
-       --iter-time "$LUKS_ITER_TIME" --key-file=- "$LUKS_PART" 2>/dev/null; then
+      --hash sha512 --pbkdf "$LUKS_KDF" --pbkdf-parallel "$PBKDF_PARALLEL" --pbkdf-memory "$LUKS_PBKDF_MEM" \
+      --iter-time "$LUKS_ITER_TIME" --key-file=- "$LUKS_PART" --batch-mode; then
     warn "luksFormat falhou com parâmetros otimizados; tentando parâmetros conservadores..."
-    if ! printf '%s' "$LUKS_PASS" | cryptsetup luksFormat --type luks2 --key-file=- "$LUKS_PART" 2>/dev/null; then
+    if ! printf '%s' "$LUKS_PASS" | cryptsetup luksFormat --type luks2 --key-file=- "$LUKS_PART" --batch-mode; then
       fatal "luksFormat falhou completamente"
     fi
   fi
@@ -472,7 +472,7 @@ setup_encryption_and_lvm() {
   if [[ "$ENABLE_AUTO_DESTRUCTION" -eq 1 ]]; then
     printf '%s' "$DESTRUCTION_PASS" > /tmp/destruction_key
     chmod 600 /tmp/destruction_key
-    if ! printf '%s' "$LUKS_PASS" | cryptsetup luksAddKey "$LUKS_PART" /tmp/destruction_key - 2>/dev/null; then
+    if ! printf '%s' "$LUKS_PASS" | cryptsetup luksAddKey "$LUKS_PART" /tmp/destruction_key --key-file=-; then
       warn "luksAddKey (destruição) falhou"
     fi
     shred -vfz -n 3 /tmp/destruction_key 2>/dev/null || rm -f /tmp/destruction_key
@@ -488,12 +488,12 @@ setup_encryption_and_lvm() {
     dd if=/dev/urandom of=/tmp/hd_keyfile bs=1024 count=4 status=none
     chmod 600 /tmp/hd_keyfile
 
-    if ! cryptsetup luksFormat --type luks2 "$DATA_PART" /tmp/hd_keyfile 2>/dev/null; then
+    if ! cryptsetup luksFormat --type luks2 "$DATA_PART" /tmp/hd_keyfile --batch-mode; then
       warn "luksFormat (data) falhou"
     fi
     
     # Adiciona senha principal ao disco de dados
-    if ! printf '%s' "$LUKS_PASS" | cryptsetup luksAddKey "$DATA_PART" /tmp/hd_keyfile - 2>/dev/null; then
+    if ! printf '%s' "$LUKS_PASS" | cryptsetup luksAddKey "$DATA_PART" --key-file=-; then
       warn "luksAddKey (data) falhou"
     fi
 
@@ -501,7 +501,7 @@ setup_encryption_and_lvm() {
     if [[ "$ENABLE_AUTO_DESTRUCTION" -eq 1 ]]; then
       printf '%s' "$DESTRUCTION_PASS" > /tmp/destruction_data_key
       chmod 600 /tmp/destruction_data_key
-      if ! printf '%s' "$LUKS_PASS" | cryptsetup luksAddKey "$DATA_PART" /tmp/destruction_data_key - 2>/dev/null; then
+      if ! printf '%s' "$LUKS_PASS" | cryptsetup luksAddKey "$DATA_PART" /tmp/destruction_data_key --key-file=-; then
         warn "luksAddKey destruição (data) falhou"
       fi
       shred -vfz -n 3 /tmp/destruction_data_key 2>/dev/null || rm -f /tmp/destruction_data_key
@@ -551,8 +551,8 @@ mount_filesystems_for_install() {
   mount "$EFI_PART" /mnt/boot/efi || fatal "Falha ao montar /boot/efi"
   mount "/dev/$VG_NAME/$LV_HOME_NAME" /mnt/home || fatal "Falha ao montar /home"
   if [[ "$ENABLE_DUAL_ENCRYPTION" -eq 1 ]] && [[ -b /dev/mapper/cryptdata ]]; then
-    mkdir -p /mnt/home/dados
-    mount /dev/mapper/cryptdata /mnt/home/dados || warn "Falha ao montar /home/dados"
+    mkdir -p /mnt/data
+    mount /dev/mapper/cryptdata /mnt/data || warn "Falha ao montar /data"
   fi
   info "Montagem concluída."
 }
@@ -566,18 +566,16 @@ install_base_and_prepare() {
     info "Atualizando mirrors..."
     reflector --country Brazil --age 6 --protocol https --sort rate --save /etc/pacman.d/mirrorlist || warn "reflector falhou"
     pacman -Sy --noconfirm || warn "pacman -Sy falhou"
-    pacstrap /mnt "${base_packages[@]}" --noconfirm || warn "pacstrap retornou aviso/erro"
-  else
-    warn "Sem internet - instalando apenas pacotes disponíveis localmente"
-    pacstrap /mnt base linux linux-firmware lvm2 cryptsetup --noconfirm || warn "pacstrap sem rede pode falhar se pacotes ausentes"
   fi
+  
+  pacstrap /mnt "${base_packages[@]}" --noconfirm || fatal "pacstrap falhou. Verifique a conexão ou pacotes no ISO."
 
   genfstab -U /mnt > /mnt/etc/fstab
 
   # Adiciona entrada para disco de dados no fstab se habilitado
   if [[ "$ENABLE_DUAL_ENCRYPTION" -eq 1 ]]; then
     echo "# Disco de dados criptografado" >> /mnt/etc/fstab
-    echo "/dev/mapper/cryptdata /home/dados ext4 defaults,noatime 0 2" >> /mnt/etc/fstab
+    echo "/dev/mapper/cryptdata /data ext4 defaults,noatime 0 2" >> /mnt/etc/fstab
   fi
 
   # Salva informações importantes para uso no chroot
@@ -585,6 +583,7 @@ install_base_and_prepare() {
   echo "$TARGET_DISK" > /mnt/root/target_disk
   if [[ "$ENABLE_DUAL_ENCRYPTION" -eq 1 ]]; then
     echo "$DATA_UUID" > /mnt/root/data_uuid
+    echo "$DATA_DISK" > /mnt/root/data_disk
   fi
 
   if [[ "$ENABLE_AUTO_DESTRUCTION" -eq 1 && -f /tmp/destruction_hash ]]; then
@@ -600,7 +599,7 @@ prepare_keyfile_encrypted_by_pin() {
     mkdir -p /mnt/etc/cryptsetup-keys.d
     if [[ -f /tmp/hd_keyfile ]]; then
       if printf '%s' "$PIN_DATA" | openssl enc -aes-256-cbc -pbkdf2 -salt -iter 100000 -pass stdin \
-        -in /tmp/hd_keyfile -out /mnt/etc/cryptsetup-keys.d/hd_keyfile.enc 2>/dev/null; then
+        -in /tmp/hd_keyfile -out /mnt/etc/cryptsetup-keys.d/hd_keyfile.enc; then
         chmod 600 /mnt/etc/cryptsetup-keys.d/hd_keyfile.enc || true
         shred -vfz -n 3 /tmp/hd_keyfile 2>/dev/null || rm -f /tmp/hd_keyfile
         info "Keyfile protegido por PIN instalado."
@@ -621,19 +620,29 @@ prepare_pw_files_for_chroot() {
 
 configure_chroot() {
   info "Entrando no chroot para configurações finais..."
-  arch-chroot /mnt /usr/bin/env bash <<CHROOT
+  # CORREÇÃO: Passando variáveis para o chroot de forma segura
+  arch-chroot /mnt /usr/bin/env \
+    TIMEZONE="$TIMEZONE" \
+    LOCALE="$LOCALE" \
+    KEYMAP="$KEYMAP" \
+    HOSTNAME="$HOSTNAME" \
+    USERNAME="$USERNAME" \
+    USER_SHELL="$USER_SHELL" \
+    VG_NAME="$VG_NAME" \
+    LV_ROOT_NAME="$LV_ROOT_NAME" \
+    bash <<'CHROOT'
 set -euo pipefail
 
+info(){ printf "\033[0;34m[INFO-CHROOT]\033[0m %s\n" "$*"; }
+warn(){ printf "\033[1;33m[AVISO-CHROOT]\033[0m %s\n" "$*"; }
+
 # Configurações de localização
-ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime || warn "Falha ao definir timezone"
+ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime || warn "Falha ao definir timezone"
 hwclock --systohc || warn "Falha ao sincronizar hardware clock"
 
 # Configuração de locale
-if grep -q "^#$LOCALE" /etc/locale.gen; then
-    sed -i "s/^#\($LOCALE.*\)/\1/" /etc/locale.gen
-else
-    echo "$LOCALE UTF-8" >> /etc/locale.gen
-fi
+sed -i "s/^#\($LOCALE.*\)/\1/" /etc/locale.gen
+echo "$LOCALE UTF-8" >> /etc/locale.gen
 locale-gen || warn "Falha ao gerar locales"
 echo "LANG=$LOCALE" > /etc/locale.conf
 
@@ -643,9 +652,9 @@ echo "KEYMAP=$KEYMAP" > /etc/vconsole.conf
 # Configuração de rede
 echo "$HOSTNAME" > /etc/hostname
 cat > /etc/hosts <<HOSTS
-127.0.0.1   localhost
-::1         localhost
-127.0.1.1   $HOSTNAME.localdomain $HOSTNAME
+127.0.0.1  localhost
+::1        localhost
+127.0.1.1  $HOSTNAME.localdomain $HOSTNAME
 HOSTS
 
 # Configuração de usuários
@@ -676,23 +685,15 @@ chmod 440 /etc/sudoers.d/wheel
 
 # Configuração SSH mais segura
 if [[ -f /etc/ssh/sshd_config ]]; then
-  cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
-  {
-    echo "PermitRootLogin no"
-    echo "PasswordAuthentication yes"
-    echo "PubkeyAuthentication yes"
-    echo "AuthorizedKeysFile .ssh/authorized_keys"
-    echo "Protocol 2"
-    echo "Port 22"
-    echo "MaxAuthTries 3"
-    echo "LoginGraceTime 60"
-    echo "AllowUsers $USERNAME"
-  } >> /etc/ssh/sshd_config
+  sed -i 's/^#?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+  sed -i 's/^#?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  sed -i 's/^#?MaxAuthTries.*/MaxAuthTries 3/' /etc/ssh/sshd_config
+  echo "AllowUsers $USERNAME" >> /etc/ssh/sshd_config
 fi
 
 # Configuração mkinitcpio
+# A ordem dos hooks é crucial: block, encrypt e lvm2 devem vir antes de filesystems.
 if [[ -f /etc/mkinitcpio.conf ]]; then
-  cp /etc/mkinitcpio.conf /etc/mkinitcpio.conf.bak
   sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block encrypt lvm2 filesystems keyboard fsck)/' /etc/mkinitcpio.conf
   mkinitcpio -P || warn "mkinitcpio falhou"
 fi
@@ -703,23 +704,20 @@ systemctl enable sshd || warn "Falha ao habilitar sshd"
 
 # Instalação e configuração do GRUB
 if [[ -f /root/luks_uuid && -f /root/target_disk ]]; then
-  LUKS_UUID=\$(cat /root/luks_uuid)
-  TARGET_DISK=\$(cat /root/target_disk)
+  LUKS_UUID=$(cat /root/luks_uuid)
+  TARGET_DISK=$(cat /root/target_disk)
   
   # Configuração do GRUB
   if [[ -f /etc/default/grub ]]; then
-    cp /etc/default/grub /etc/default/grub.bak
-    sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=\${LUKS_UUID}:cryptroot root=/dev/$VG_NAME/$LV_ROOT_NAME\"|" /etc/default/grub
-    
-    # Melhora a segurança do GRUB
+    sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=${LUKS_UUID}:cryptroot root=/dev/${VG_NAME}/${LV_ROOT_NAME}\"|" /etc/default/grub
     sed -i 's/^#GRUB_ENABLE_CRYPTODISK=.*/GRUB_ENABLE_CRYPTODISK=y/' /etc/default/grub
-    
-    # Timeout mais rápido
     sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=3/' /etc/default/grub
   fi
   
   # Instala GRUB
-  if grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ARCH "\$TARGET_DISK"; then
+  # CORREÇÃO: Adicionado --removable para criar um bootloader mais robusto e portátil.
+  # O bootloader será instalado em /boot/efi/EFI/BOOT/BOOTX64.EFI, o caminho de fallback padrão.
+  if grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ARCH --removable --force "$TARGET_DISK"; then
     info "GRUB instalado com sucesso"
   else
     warn "Falha na instalação do GRUB"
@@ -740,7 +738,7 @@ if [[ -f /etc/secure-destruction.hash ]]; then
 fi
 
 # Limpeza de arquivos temporários
-rm -f /root/luks_uuid /root/target_disk /root/data_uuid 2>/dev/null || true
+rm -f /root/luks_uuid /root/target_disk /root/data_uuid /root/data_disk 2>/dev/null || true
 
 # Configurações de segurança adicionais
 {
@@ -751,16 +749,6 @@ rm -f /root/luks_uuid /root/target_disk /root/data_uuid 2>/dev/null || true
   echo "export HISTCONTROL=ignoredups:erasedups"
 } > /etc/profile.d/security.sh
 chmod 644 /etc/profile.d/security.sh
-
-# Configuração de limites do sistema
-cat > /etc/security/limits.conf <<LIMITS
-* soft core 0
-* hard core 0
-* soft nproc 1024
-* hard nproc 2048
-* soft nofile 1024
-* hard nofile 2048
-LIMITS
 
 info "Configuração do chroot concluída"
 CHROOT
@@ -778,305 +766,129 @@ install_unlock_and_destroy_helpers() {
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Função para limpeza segura
 cleanup() {
   local tmpfile="$1"
-  if [[ -f "$tmpfile" ]]; then
-    shred -vfz -n 3 "$tmpfile" 2>/dev/null || rm -f "$tmpfile"
-  fi
+  [[ -f "$tmpfile" ]] && { shred -vfz -n 3 "$tmpfile" 2>/dev/null || rm -f "$tmpfile"; }
 }
 
-# Verifica se está rodando como root
-if [[ $EUID -ne 0 ]]; then
-  echo "Este script deve ser executado como root (use sudo)"
+(( EUID == 0 )) || { echo "Execute como root (sudo)"; exit 1; }
+
+read -rsp "Digite o PIN para desbloquear o HD de dados: " pin; echo
+
+ENC_KEYFILE="/etc/cryptsetup-keys.d/hd_keyfile.enc"
+TMP_KEYFILE="/tmp/hd_keyfile.$$"
+trap 'cleanup "$TMP_KEYFILE"' EXIT
+
+[[ -f "$ENC_KEYFILE" ]] || { echo "ERRO: Keyfile $ENC_KEYFILE não encontrado."; exit 1; }
+
+if ! printf '%s' "$pin" | openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 -pass stdin -in "$ENC_KEYFILE" -out "$TMP_KEYFILE"; then
+  echo "ERRO: PIN incorreto ou falha ao decifrar."
   exit 1
 fi
+chmod 600 "$TMP_KEYFILE"
 
-echo "=== Desbloqueador de HD de Dados ==="
-read -rsp "Digite o PIN para desbloquear o HD: " pin
-echo
-
-ENC="/etc/cryptsetup-keys.d/hd_keyfile.enc"
-TMPK="/tmp/hd_keyfile.$$"
-
-if [[ ! -f "$ENC" ]]; then
-  echo "ERRO: Arquivo encriptado não encontrado: $ENC"
-  exit 1
-fi
-
-# Tenta descriptografar o keyfile
-if ! printf '%s' "$pin" | openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 -pass stdin -in "$ENC" -out "$TMPK" 2>/dev/null; then
-  echo "ERRO: PIN incorreto ou falha ao decifrar"
-  cleanup "$TMPK"
-  exit 1
-fi
-
-chmod 600 "$TMPK"
-
-# Tenta abrir o volume LUKS
+# CORREÇÃO: Usa UUID para encontrar o dispositivo, tornando-o robusto a mudanças de nome.
 DATA_UUID="REPLACE_DATA_UUID"
-if [[ -n "$DATA_UUID" ]]; then
-  DEVICE="/dev/disk/by-uuid/$DATA_UUID"
-else
-  DEVICE="/dev/sdb1"  # fallback
-fi
+DEVICE="/dev/disk/by-uuid/$DATA_UUID"
 
-if ! cryptsetup open "$DEVICE" cryptdata --key-file "$TMPK" 2>/dev/null; then
-  echo "ERRO: Falha ao abrir volume LUKS"
-  cleanup "$TMPK"
+[[ -b "$DEVICE" ]] || { echo "ERRO: Dispositivo com UUID $DATA_UUID não encontrado."; exit 1; }
+
+if ! cryptsetup open "$DEVICE" cryptdata --key-file "$TMP_KEYFILE"; then
+  echo "ERRO: Falha ao abrir volume LUKS. O keyfile pode estar corrompido."
   exit 1
 fi
-
-cleanup "$TMPK"
 
 echo "✓ HD desbloqueado: /dev/mapper/cryptdata"
 
-# Tenta montar automaticamente
-MOUNT_POINT="/home/dados"
-if [[ ! -d "$MOUNT_POINT" ]]; then
-  mkdir -p "$MOUNT_POINT"
-fi
-
-if mount /dev/mapper/cryptdata "$MOUNT_POINT" 2>/dev/null; then
+MOUNT_POINT="/data"
+mkdir -p "$MOUNT_POINT"
+if mount /dev/mapper/cryptdata "$MOUNT_POINT"; then
   echo "✓ HD montado em $MOUNT_POINT"
-  echo "✓ Conteúdo disponível em $MOUNT_POINT"
 else
-  echo "⚠ Volume desbloqueado mas falha na montagem automática"
-  echo "  Tente manualmente: mount /dev/mapper/cryptdata $MOUNT_POINT"
+  echo "⚠ Volume desbloqueado, mas falha na montagem. Tente: mount /dev/mapper/cryptdata $MOUNT_POINT"
 fi
 UNLOCK
 
-    # Substitui placeholder pela UUID real (se existir)
-    if [[ -n "$DATA_UUID" ]]; then
-      sed -i "s/REPLACE_DATA_UUID/${DATA_UUID}/g" /mnt/usr/local/bin/unlock-data.sh
-    fi
+    # CORREÇÃO: Substitui placeholder pela UUID real para robustez.
+    sed -i "s/REPLACE_DATA_UUID/${DATA_UUID}/g" /mnt/usr/local/bin/unlock-data.sh
     chmod 755 /mnt/usr/local/bin/unlock-data.sh
   fi
 
-  # Script de auto-destruição com estimador de progresso melhorado
   cat > /mnt/usr/local/bin/crypto-destroy <<'DESTROY'
 #!/bin/bash
 set -euo pipefail
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 HASH_FILE="/etc/secure/destruction.hash"
 
 echo -e "${RED}⚠ AVISO: SISTEMA DE AUTO-DESTRUIÇÃO ⚠${NC}"
 echo "Este comando irá DESTRUIR PERMANENTEMENTE todos os dados criptografados!"
-echo "Esta ação é IRREVERSÍVEL!"
-echo
 read -rp "Digite 'DESTRUIR' para confirmar: " confirm
+[[ "$confirm" == "DESTRUIR" ]] || { echo "Operação cancelada."; exit 0; }
 
-if [[ "$confirm" != "DESTRUIR" ]]; then
-  echo "Operação cancelada."
-  exit 0
-fi
+[[ -f "$HASH_FILE" ]] || { echo -e "${RED}ERRO: Arquivo de hash não encontrado.${NC}"; exit 1; }
 
-# Verifica arquivo de hash
-if [[ ! -f "$HASH_FILE" ]]; then
-  echo -e "${RED}ERRO: Arquivo de hash não encontrado em $HASH_FILE${NC}"
-  exit 1
-fi
-
-# Solicita senha de destruição
-echo
-read -rsp "Senha de destruição: " pass
-echo
-
-# Verifica senha
+read -rsp "Senha de destruição: " pass; echo
 input_hash=$(printf '%s' "$pass" | sha256sum | awk '{print $1}')
-stored_hash=$(cat "$HASH_FILE" 2>/dev/null || echo "")
-
-if [[ "$input_hash" != "$stored_hash" ]]; then
-  echo -e "${RED}ERRO: Senha incorreta${NC}"
-  exit 1
-fi
+stored_hash=$(cat "$HASH_FILE")
+[[ "$input_hash" == "$stored_hash" ]] || { echo -e "${RED}ERRO: Senha incorreta.${NC}"; exit 1; }
 
 echo -e "${GREEN}✓ Senha válida. Iniciando destruição...${NC}"
-echo
 
-# Função para destruição com progresso
-wipe_with_progress() {
-  local dev="$1"
+wipe_partition() {
+  local dev_path="$1"
   local dev_name="$2"
   
-  if [[ ! -b "$dev" ]]; then
-    echo -e "${YELLOW}⚠ Dispositivo não encontrado: $dev${NC}"
-    return 1
-  fi
+  [[ -b "$dev_path" ]] || { echo -e "${YELLOW}⚠ Partição $dev_name ($dev_path) não encontrada. Pulando.${NC}"; return 1; }
 
-  echo -e "${YELLOW}🔥 Destruindo $dev_name ($dev)...${NC}"
-
-  # Primeiro tenta luksErase para destruir cabeçalhos LUKS rapidamente
-  if command -v cryptsetup >/dev/null 2>&1; then
-    if cryptsetup isLuks "$dev" 2>/dev/null; then
-      echo "  ├─ Destruindo cabeçalhos LUKS..."
-      if cryptsetup luksErase --batch-mode "$dev" 2>/dev/null; then
-        echo -e "  ├─ ${GREEN}✓ Cabeçalhos LUKS destruídos${NC}"
-      else
-        echo -e "  ├─ ${YELLOW}⚠ Falha ao destruir cabeçalhos LUKS${NC}"
-      fi
-    fi
-  fi
-
-  # Tenta TRIM/discard para SSDs
-  if command -v blkdiscard >/dev/null 2>&1; then
-    echo "  ├─ Tentando TRIM/discard..."
-    if timeout 30 blkdiscard "$dev" >/dev/null 2>&1; then
-      echo -e "  ├─ ${GREEN}✓ TRIM/discard concluído instantaneamente${NC}"
-      return 0
-    else
-      echo -e "  ├─ ${YELLOW}⚠ TRIM/discard não suportado ou falhou${NC}"
-    fi
-  fi
-
-  # Sobrescrita com dados aleatórios (com progresso)
-  echo "  ├─ Obtendo tamanho do dispositivo..."
-  local total_bytes
-  total_bytes=$(blockdev --getsize64 "$dev" 2>/dev/null || echo 0)
+  echo -e "${YELLOW}🔥 Destruindo $dev_name ($dev_path)...${NC}"
   
-  if [[ "$total_bytes" -le 0 ]]; then
-    echo -e "  ├─ ${YELLOW}⚠ Falha ao obter tamanho, usando dd simples...${NC}"
-    timeout 300 dd if=/dev/urandom of="$dev" bs=1M status=progress 2>/dev/null || true
-    return $?
+  if cryptsetup isLuks "$dev_path" &>/dev/null; then
+    echo "  ├─ Destruindo cabeçalhos LUKS..."
+    cryptsetup luksErase --batch-mode "$dev_path" &>/dev/null && echo -e "  ├─ ${GREEN}✓ Cabeçalhos LUKS destruídos${NC}" || echo -e "  ├─ ${YELLOW}⚠ Falha ao destruir cabeçalhos LUKS${NC}"
   fi
 
-  local total_mb=$((total_bytes / 1024 / 1024))
-  local chunk_mb=4
-  local chunk_bytes=$((chunk_mb * 1024 * 1024))
-  local written=0
-  local start_time=$(date +%s)
-  
-  echo "  ├─ Iniciando sobrescrita: $total_mb MB em blocos de ${chunk_mb}MB"
-  echo "  └─ Progresso:"
-
-  while (( written < total_bytes )); do
-    local remaining=$((total_bytes - written))
-    local current_chunk=$chunk_bytes
-    
-    if (( remaining < current_chunk )); then
-      current_chunk=$remaining
-    fi
-
-    # Escreve um bloco
-    if ! timeout 60 dd if=/dev/urandom of="$dev" bs="$current_chunk" count=1 \
-         seek=$((written / current_chunk)) conv=notrunc oflag=direct status=none 2>/dev/null; then
-      echo -e "\n     ${YELLOW}⚠ Timeout ou erro na escrita, continuando...${NC}"
-    fi
-
-    written=$((written + current_chunk))
-    
-    # Calcula estatísticas
-    local now=$(date +%s)
-    local elapsed=$((now - start_time))
-    if (( elapsed <= 0 )); then elapsed=1; fi
-    
-    local speed_bps=$((written / elapsed))
-    local percent=$((written * 100 / total_bytes))
-    local written_mb=$((written / 1024 / 1024))
-    
-    local eta_sec=0
-    if (( speed_bps > 0 )); then
-      eta_sec=$(((total_bytes - written) / speed_bps))
-    fi
-    
-    # Mostra progresso
-    printf "\r     %3d%% │ %4d/%4d MB │ %2d:%02d restante │ %4.1f MB/s" \
-           "$percent" "$written_mb" "$total_mb" \
-           $((eta_sec/60)) $((eta_sec%60)) \
-           $((speed_bps / 1024 / 1024))
-  done
-  
-  echo -e "\n  └─ ${GREEN}✓ Sobrescrita concluída${NC}"
+  echo "  ├─ Iniciando sobrescrita com dados aleatórios..."
+  if dd if=/dev/urandom of="$dev_path" bs=1M status=progress; then
+    echo -e "\n  └─ ${GREEN}✓ Sobrescrita concluída${NC}"
+  else
+    echo -e "\n  └─ ${RED}✗ Erro durante a sobrescrita${NC}"
+  fi
   sync
-  return 0
 }
 
-# Função principal de destruição
 main_destruction() {
   echo -e "${RED}🔥 INICIANDO DESTRUIÇÃO TOTAL 🔥${NC}"
-  echo
-
-  # Descobre dispositivos LUKS ativos
-  TARGET_DEVICE=""
-  DATA_DEVICE=""
   
-  if cryptsetup status cryptroot >/dev/null 2>&1; then
-    TARGET_DEVICE=$(cryptsetup status cryptroot 2>/dev/null | awk '/device:/ {print $2}' || echo "")
-  fi
+  # CORREÇÃO: Usa UUIDs para encontrar os dispositivos de forma confiável.
+  LUKS_UUID="REPLACE_LUKS_UUID"
+  DATA_UUID="REPLACE_DATA_UUID"
   
-  if cryptsetup status cryptdata >/dev/null 2>&1; then
-    DATA_DEVICE=$(cryptsetup status cryptdata 2>/dev/null | awk '/device:/ {print $2}' || echo "")
-  fi
-
-  # Fallbacks se não conseguir descobrir automaticamente
-  if [[ -z "$TARGET_DEVICE" && -b "/dev/sda3" ]]; then
-    TARGET_DEVICE="/dev/sda3"
-  fi
+  local target_part="/dev/disk/by-uuid/$LUKS_UUID"
+  local data_part="/dev/disk/by-uuid/$DATA_UUID"
   
-  if [[ -z "$DATA_DEVICE" && -b "/dev/sdb1" ]]; then
-    DATA_DEVICE="/dev/sdb1"
-  fi
-
-  local destruction_count=0
-
-  # Destrói disco do sistema
-  if [[ -n "$TARGET_DEVICE" ]]; then
-    if wipe_with_progress "$TARGET_DEVICE" "DISCO SISTEMA"; then
-      ((destruction_count++))
-    fi
-  fi
-
-  # Destrói disco de dados
-  if [[ -n "$DATA_DEVICE" ]]; then
-    if wipe_with_progress "$DATA_DEVICE" "DISCO DADOS"; then
-      ((destruction_count++))
-    fi
-  fi
-
-  # Destruição adicional de dispositivos inteiros por precaução
-  for whole_device in /dev/sda /dev/sdb; do
-    if [[ -b "$whole_device" ]]; then
-      # Só destrói se não foi o mesmo dispositivo já destruído
-      if [[ "$whole_device" != "$TARGET_DEVICE" && "$whole_device" != "$DATA_DEVICE" ]]; then
-        echo -e "${YELLOW}🔥 Destruição adicional de precaução...${NC}"
-        # Só destrói primeiros 100MB por precaução e velocidade
-        if timeout 60 dd if=/dev/urandom of="$whole_device" bs=1M count=100 status=progress 2>/dev/null; then
-          echo -e "${GREEN}✓ Precaução aplicada em $whole_device${NC}"
-        fi
-      fi
-    fi
-  done
-
-  echo
-  if (( destruction_count > 0 )); then
-    echo -e "${GREEN}✓ DESTRUIÇÃO CONCLUÍDA: $destruction_count dispositivo(s) destruído(s)${NC}"
-  else
-    echo -e "${YELLOW}⚠ NENHUM DISPOSITIVO ENCONTRADO PARA DESTRUIR${NC}"
-  fi
+  wipe_partition "$target_part" "PARTIÇÃO SISTEMA"
   
-  echo -e "${RED}🔥 Sincronizando e desligando sistema...${NC}"
+  if [[ -n "$DATA_UUID" ]]; then
+    wipe_partition "$data_part" "PARTIÇÃO DADOS"
+  fi
+
+  echo -e "${GREEN}✓ DESTRUIÇÃO CONCLUÍDA.${NC}"
+  echo -e "${RED}🔥 Sincronizando e desligando sistema em 5 segundos...${NC}"
   sync
-  
-  # Agenda desligamento
-  echo "Sistema será desligado em 5 segundos..."
   sleep 5
   poweroff -f
 }
 
-# Executa destruição em background para não travar
-main_destruction &
-echo -e "${YELLOW}⚡ Processo de destruição iniciado em background${NC}"
-
-# Aguarda um pouco e sai
-sleep 2
-echo "Saindo do script. Destruição continua em background."
+# CORREÇÃO: Executa em primeiro plano para garantir a conclusão e feedback.
+main_destruction
 DESTROY
 
+  # CORREÇÃO: Injeta os UUIDs reais no script de destruição.
+  LUKS_UUID=$(cat /mnt/root/luks_uuid 2>/dev/null || echo "")
+  DATA_UUID=$(cat /mnt/root/data_uuid 2>/dev/null || echo "")
+  sed -i "s/REPLACE_LUKS_UUID/${LUKS_UUID}/g" /mnt/usr/local/bin/crypto-destroy
+  sed -i "s/REPLACE_DATA_UUID/${DATA_UUID}/g" /mnt/usr/local/bin/crypto-destroy
   chmod 700 /mnt/usr/local/bin/crypto-destroy
 
   info "Helpers instalados com sucesso."
@@ -1086,29 +898,30 @@ verify_installation() {
   info "Verificando arquivos críticos..."
   local errors=0
   
-  [[ -e /mnt/etc/fstab ]] || { warn "/etc/fstab ausente"; ((errors++)); }
-  [[ -e /mnt/boot/grub/grub.cfg ]] || { warn "grub.cfg ausente"; ((errors++)); }
-  [[ -e /mnt/usr/local/bin/crypto-destroy ]] || { warn "crypto-destroy ausente"; ((errors++)); }
+  [[ -s /mnt/etc/fstab ]] || { warn "/etc/fstab ausente ou vazio"; ((errors++)); }
+  [[ -s /mnt/boot/grub/grub.cfg ]] || { warn "grub.cfg ausente ou vazio"; ((errors++)); }
   
-  if [[ "$ENABLE_DUAL_ENCRYPTION" -eq 1 ]]; then
-    [[ -e /mnt/usr/local/bin/unlock-data.sh ]] || { warn "unlock-data.sh ausente"; ((errors++)); }
-    [[ -e /mnt/etc/cryptsetup-keys.d/hd_keyfile.enc ]] || { warn "hd_keyfile.enc ausente"; ((errors++)); }
+  if [[ "$ENABLE_AUTO_DESTRUCTION" -eq 1 ]]; then
+    [[ -f /mnt/usr/local/bin/crypto-destroy ]] || { warn "crypto-destroy ausente"; ((errors++)); }
   fi
   
-  # Verifica se usuário foi criado
+  if [[ "$ENABLE_DUAL_ENCRYPTION" -eq 1 ]]; then
+    [[ -f /mnt/usr/local/bin/unlock-data.sh ]] || { warn "unlock-data.sh ausente"; ((errors++)); }
+    [[ -f /mnt/etc/cryptsetup-keys.d/hd_keyfile.enc ]] || { warn "hd_keyfile.enc ausente"; ((errors++)); }
+  fi
+  
   if ! arch-chroot /mnt id "$USERNAME" >/dev/null 2>&1; then
     warn "Usuário $USERNAME não foi criado corretamente"
     ((errors++))
   fi
   
-  # Verifica se volumes LVM existem
   if ! [[ -b "/dev/$VG_NAME/$LV_ROOT_NAME" ]]; then
     warn "Volume LVM root não encontrado"
     ((errors++))
   fi
   
   if (( errors > 0 )); then
-    warn "Verificação encontrou $errors erro(s). Revise a instalação."
+    fatal "Verificação encontrou $errors erro(s). Revise a instalação e os logs."
   else
     info "✓ Verificação concluída sem erros."
   fi
@@ -1117,30 +930,15 @@ verify_installation() {
 final_cleanup() {
   info "Limpeza final e desmontagem."
   
-  # Remove arquivos temporários sensíveis
-  for f in /tmp/destruction_hash /tmp/hd_keyfile /tmp/.pwroot /tmp/.pwuser; do
-    [[ -f "$f" ]] && { shred -vfz -n 3 "$f" 2>/dev/null || rm -f "$f"; } || true
-  done
-  
-  # Desmonta sistemas de arquivos
   umount -R /mnt 2>/dev/null || true
   
-  # Fecha volumes criptográficos
   cryptsetup luksClose cryptdata 2>/dev/null || true
   cryptsetup luksClose cryptroot 2>/dev/null || true
   
-  # Desativa volume group
   vgchange -an "$VG_NAME" 2>/dev/null || true
-  
-  # Desativa swap
   swapoff -a 2>/dev/null || true
   
   sync
-  
-  # Limpa histórico
-  unset HISTFILE 2>/dev/null || true
-  history -c 2>/dev/null || true
-  
   info "Limpeza final concluída."
 }
 
@@ -1175,7 +973,6 @@ confirm_continue() {
 }
 
 main() {
-  require_root
   confirm_continue
   validate_environment
   collect_passwords_interactive
