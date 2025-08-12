@@ -1,0 +1,53 @@
+Você é um especialista em Arch Linux e scripts Bash. Modifique o script disponível em https://github.com/macafd/Archmonkey/blob/main/arch.sh adicionando as seguintes funcionalidades SEM REMOVER NENHUMA FUNCIONALIDADE EXISTENTE:
+
+1. **Autodestruição via atalho gráfico (Ctrl+Alt+F12+Ç):**
+   - Instalar automaticamente `xbindkeys` e `zenity` no ambiente gráfico
+   - Criar ~/.xbindkeysrc com o comando de autodestruição
+   - Adicionar entrada no autostart do ambiente gráfico
+
+2. **Firewall automático:**
+   - Instalar e ativar `ufw` por padrão
+   - Configurar políticas padrão: `ufw default deny incoming` e `ufw default allow outgoing`
+
+3. **Verificação de integridade:**
+   - Validar assinaturas GPG de todos os pacotes antes da instalação
+   - Verificar checksums dos pacotes críticos
+
+4. **Backup criptografado pré-wipe:**
+   - Criar backup criptografado de /etc, /home e logs importantes antes da autodestruição
+   - Usar GPG com senha baseada no hash do sistema
+
+5. **Logs seguros:**
+   - Armazenar logs de instalação em /var/log/arch_install.log com permissões restritas
+   - Remover dados sensíveis dos logs (senhas, chaves, etc)
+
+6. **Secure Boot:**
+   - Detectar se o sistema tem Secure Boot ativo
+   - Instalar `sbctl` e configurar chaves automaticamente
+   - Assinar o kernel se o Secure Boot estiver habilitado
+
+7. **Hardening pós-instalação:**
+   - Aplicar configurações de segurança no /etc/sysctl.d
+   - Configurar opções seguras para kernel modules
+   - Reforçar permissões de arquivos sensíveis
+
+8. **Notificação remota:**
+   - Enviar webhook/email ao acionar autodestruição (usando curl)
+   - Configurável via variáveis no início do script
+
+9. **Customização de pacotes:**
+   - Ler lista de pacotes de arquivo externo (pkglist.txt)
+   - Permitir override via variável de ambiente
+
+10. **Ajuda integrada:**
+    - Adicionar opção `--help` com documentação detalhada
+    - Incluir validação de argumentos via linha de comando
+
+CORRIJA ESPECIFICAMENTE:
+- O bug "GREEN: unbound variable" definindo todas variáveis de cor no início
+- Otimize o código existente sem alterar a lógica principal
+- Mantenha compatibilidade com UEFI/Legacy BIOS
+- Garanta que todas as funções originais permaneçam intactas
+
+ENTREGA:
+Retorne APENAS o script bash completo e funcional, sem comentários extras ou explicações.
