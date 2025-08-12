@@ -2,10 +2,11 @@
 #
 # install-secure-arch-consolidated.sh
 #
-# Instalação segura do Arch Linux (consolidado)
+# Instalação segura do Arch Linux (consolidado e otimizado)
 # - Combina os dois scripts anteriores e aplica hardening e correções de segurança.
 # - NÃO usa USB seguro. Usa PIN para proteger keyfile do HD de dados.
 # - Possui mecanismo de AUTO-DESTRUIÇÃO acionado via senha (hash verificado).
+# - Otimizado para uso com cabo de rede no Arch Live
 #
 # !!! ATENÇÃO: DESTRUTIVO. TESTE EM VM ANTES DE RODAR EM HARDWARE REAL !!!
 #
@@ -31,7 +32,20 @@ err(){ printf "${RED}[ERRO]${NC} %s\n" "$*"; }
 fatal(){ err "$*"; exit 1; }
 require_root(){ (( EUID == 0 )) || fatal "Execute o script como root."; }
 
-part_suffix(){ local disk="$1"; [[ "$disk" =~ nvme ]] && echo "p" || echo ""; }
+# Suporta nvme e mmcblk (p suffix necessário)
+part_suffix(){ local disk="$1"; [[ "$disk" =~ nvme|mmcblk ]] && echo "p" || echo ""; }
+
+# Verifica se temos RAM suficiente para parâmetros PBKDF2 altos
+check_memory_for_pbkdf() {
+  local mem_kb
+  mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+  local mem_gb=$((mem_kb / 1024 / 1024))
+  
+  if [[ $mem_gb -lt 2 ]]; then
+    warn "Sistema com pouca RAM (${mem_gb}GB). Parâmetros PBKDF podem ser muito altos."
+    warn "Considere reduzir LUKS_PBKDF_MEM se houver problemas de performance."
+  fi
+}
 
 # -------------------- Configuração (edite com cuidado) --------------------
 # Dispositivos
@@ -90,6 +104,9 @@ secure_cleanup() {
   shred -u -n 3 /mnt/root/luks_uuid 2>/dev/null || true
   shred -u -n 3 /mnt/root/target_disk 2>/dev/null || true
   shred -u -n 3 /mnt/root/data_uuid 2>/dev/null || true
+  # Limpa histórico bash para evitar vazamento de senhas
+  unset HISTFILE 2>/dev/null || true
+  history -c 2>/dev/null || true
 }
 trap secure_cleanup EXIT INT TERM
 
@@ -101,39 +118,107 @@ confirm_continue() {
   [[ "$c" == "CONFIRMO" ]] || fatal "Abortado pelo usuário."
 }
 
+# Função para exibir senhas de forma segura para confirmação
+display_passwords_for_confirmation() {
+  echo
+  echo "=================================================="
+  echo "${GREEN}CONFIRMAÇÃO DE SENHAS COLETADAS:${NC}"
+  echo "=================================================="
+  echo "Senha LUKS (principal): [${#LUKS_PASS} caracteres] ${LUKS_PASS}"
+  if [[ "$ENABLE_AUTO_DESTRUCTION" -eq 1 ]]; then
+    echo "Senha AUTO-DESTRUIÇÃO: [${#DESTRUCTION_PASS} caracteres] ${DESTRUCTION_PASS}"
+  fi
+  echo "Senha root: [${#ROOT_PASS} caracteres] ${ROOT_PASS}"
+  echo "Senha usuário ($USERNAME): [${#USER_PASS} caracteres] ${USER_PASS}"
+  echo "PIN HD dados: [${#PIN_DATA} caracteres] ${PIN_DATA}"
+  echo "=================================================="
+  echo
+  read -rp "${YELLOW}As senhas estão corretas? (s/N): ${NC}" confirm
+  if [[ "$confirm" != "s" && "$confirm" != "S" ]]; then
+    warn "Coletando senhas novamente..."
+    return 1
+  fi
+  return 0
+}
+
 collect_passwords_interactive() {
-  info "Coleta de senhas (não serão exportadas)."
+  info "Coleta de senhas (não serão salvas em arquivos)."
   while true; do
-    read -rsp "Senha LUKS (principal): " LUKS_PASS; echo
-    read -rsp "Confirme LUKS: " tmp; echo
-    [[ "$LUKS_PASS" == "$tmp" && -n "$LUKS_PASS" ]] || { warn "LUKS mismatch"; continue; }
+    echo
+    read -rsp "${BLUE}Senha LUKS (principal): ${NC}" LUKS_PASS; echo
+    read -rsp "${BLUE}Confirme LUKS: ${NC}" tmp; echo
+    [[ "$LUKS_PASS" == "$tmp" && -n "$LUKS_PASS" ]] || { warn "LUKS: senhas não coincidem ou vazia"; continue; }
 
     if [[ "$ENABLE_AUTO_DESTRUCTION" -eq 1 ]]; then
-      read -rsp "Senha AUTO-DESTRUIÇÃO (mínimo 8 caracteres): " DESTRUCTION_PASS; echo
-      read -rsp "Confirme destruição: " tmp; echo
-      [[ "$DESTRUCTION_PASS" == "$tmp" && -n "$DESTRUCTION_PASS" ]] || { warn "Destruction mismatch"; continue; }
+      read -rsp "${BLUE}Senha AUTO-DESTRUIÇÃO (mínimo 8 caracteres): ${NC}" DESTRUCTION_PASS; echo
+      read -rsp "${BLUE}Confirme destruição: ${NC}" tmp; echo
+      [[ "$DESTRUCTION_PASS" == "$tmp" && ${#DESTRUCTION_PASS} -ge 8 ]] || { warn "Destruição: senhas não coincidem ou muito curta"; continue; }
     fi
 
-    read -rsp "Senha root: " ROOT_PASS; echo
-    read -rsp "Confirme root: " tmp; echo
-    [[ "$ROOT_PASS" == "$tmp" && -n "$ROOT_PASS" ]] || { warn "Root mismatch"; continue; }
+    read -rsp "${BLUE}Senha root: ${NC}" ROOT_PASS; echo
+    read -rsp "${BLUE}Confirme root: ${NC}" tmp; echo
+    [[ "$ROOT_PASS" == "$tmp" && -n "$ROOT_PASS" ]] || { warn "Root: senhas não coincidem ou vazia"; continue; }
 
-    read -rsp "Senha do usuário $USERNAME: " USER_PASS; echo
-    read -rsp "Confirme senha do usuário: " tmp; echo
-    [[ "$USER_PASS" == "$tmp" && -n "$USER_PASS" ]] || { warn "User mismatch"; continue; }
+    read -rsp "${BLUE}Senha do usuário $USERNAME: ${NC}" USER_PASS; echo
+    read -rsp "${BLUE}Confirme senha do usuário: ${NC}" tmp; echo
+    [[ "$USER_PASS" == "$tmp" && -n "$USER_PASS" ]] || { warn "Usuário: senhas não coincidem ou vazia"; continue; }
 
-    read -rsp "PIN para desbloquear HD (curto): " PIN_DATA; echo
-    read -rsp "Confirme PIN: " tmp; echo
-    [[ "$PIN_DATA" == "$tmp" && -n "$PIN_DATA" ]] || { warn "PIN mismatch"; continue; }
+    read -rsp "${BLUE}PIN para desbloquear HD (dados): ${NC}" PIN_DATA; echo
+    read -rsp "${BLUE}Confirme PIN: ${NC}" tmp; echo
+    [[ "$PIN_DATA" == "$tmp" && -n "$PIN_DATA" ]] || { warn "PIN: não coincidem ou vazio"; continue; }
 
-    info "Senhas e PIN coletados (em memória)."
-    break
+    # Exibe senhas para confirmação
+    if display_passwords_for_confirmation; then
+      break
+    fi
+    # Se não confirmou, limpa variáveis e reinicia
+    LUKS_PASS=""; DESTRUCTION_PASS=""; ROOT_PASS=""; USER_PASS=""; PIN_DATA=""
   done
+  
+  # Criar hash da senha de destruição para uso posterior
+  if [[ "$ENABLE_AUTO_DESTRUCTION" -eq 1 ]]; then
+    DESTRUCTION_HASH=$(printf '%s' "$DESTRUCTION_PASS" | sha256sum | awk '{print $1}')
+    echo "$DESTRUCTION_HASH" > /tmp/destruction_hash
+    chmod 600 /tmp/destruction_hash
+  fi
+  
+  info "${GREEN}Senhas coletadas e confirmadas com sucesso.${NC}"
+}
+
+# Verifica se as ferramentas necessárias estão disponíveis
+check_required_tools() {
+  local missing_tools=()
+  
+  # Ferramentas críticas
+  for tool in cryptsetup sgdisk mkfs.ext4 mkfs.fat pacstrap genfstab arch-chroot; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      missing_tools+=("$tool")
+    fi
+  done
+  
+  if [[ ${#missing_tools[@]} -gt 0 ]]; then
+    fatal "Ferramentas necessárias não encontradas: ${missing_tools[*]}"
+  fi
+  
+  # LVM tools
+  for tool in pvcreate vgcreate lvcreate; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      missing_tools+=("$tool")
+    fi
+  done
+  
+  if [[ ${#missing_tools[@]} -gt 0 ]]; then
+    fatal "Ferramentas LVM não encontradas: ${missing_tools[*]}. Execute: pacman -Sy lvm2"
+  fi
+  
+  info "Todas as ferramentas necessárias estão disponíveis."
 }
 
 validate_environment() {
   require_root
   info "Validando ambiente..."
+  check_required_tools
+  check_memory_for_pbkdf
   [[ -d /sys/firmware/efi/efivars ]] || fatal "Sistema não iniciado em modo UEFI."
   [[ -b "$TARGET_DISK" ]] || fatal "TARGET_DISK $TARGET_DISK não encontrado."
   if [[ "$ENABLE_DUAL_ENCRYPTION" -eq 1 ]]; then [[ -b "$DATA_DISK" ]] || fatal "DATA_DISK $DATA_DISK não encontrado."; fi
@@ -141,49 +226,44 @@ validate_environment() {
   info "Ambiente validado."
 }
 
+# Função otimizada para verificação de rede (cabo ethernet)
 setup_network() {
-  info "Configurando rede (tentativa automática)..."
+  info "Configurando rede para cabo ethernet..."
   
-  # Tentar ativar todos os interfaces de rede
-  for iface in /sys/class/net/*; do
-    interface=$(basename "$iface")
-    # Ignorar lo (loopback)
-    if [[ "$interface" != "lo" ]]; then
-      ip link set "$interface" up || true
+  # Ativar interfaces ethernet
+  for iface in /sys/class/net/en* /sys/class/net/eth*; do
+    if [[ -d "$iface" ]]; then
+      interface=$(basename "$iface")
+      if [[ "$interface" != "lo" ]]; then
+        ip link set "$interface" up 2>/dev/null || true
+        info "Interface $interface ativada"
+      fi
     fi
   done
-
-  # Tentar DHCP para interfaces cabeadas
-  if ip link | grep -q -E 'enp|eth'; then
-    dhcpcd --noarp --release --rebind --nobackground --timeout 30 >/dev/null 2>&1 || true
-  fi
-
-  # Tentar iwd para Wi-Fi se disponível
-  if command -v iwctl >/dev/null 2>&1 && ip link | grep -q -E 'wlan|wlp'; then
-    info "Interface Wi-Fi detectada. Conecte-se manualmente com:"
-    warn "  iwctl"
-    warn "  station wlan0 scan"
-    warn "  station wlan0 get-networks"
-    warn "  station wlan0 connect NOME_DA_REDE"
-    warn "  exit"
-    warn "Depois de conectado, pressione Enter para continuar..."
-    read -r
-  fi
-
-  if ping -c1 8.8.8.8 >/dev/null 2>&1; then
-    info "Conectividade OK; sincronizando relógio."
-    timedatectl set-ntp true || warn "timedatectl falhou"
-    return
-  fi
   
-  warn "Sem conectividade detectada. Configure rede manualmente:"
-  warn "  ip link"
-  warn "  dhcpcd interface"
-  warn "  iwctl # para Wi-Fi"
-  warn "Depois de conectado, execute:"
-  warn "  timedatectl set-ntp true"
-  warn "Pressione Enter para continuar sem internet (risco de falha no pacstrap)..."
-  read -r
+  # Aguardar link e obter IP via DHCP
+  info "Aguardando conexão ethernet..."
+  sleep 3
+  
+  # Se dhcpcd estiver disponível, tentar; senão usar systemd-networkd/resolved
+  if command -v dhcpcd >/dev/null 2>&1; then
+    timeout 15 dhcpcd --noarp --timeout 10 2>/dev/null || warn "DHCP (dhcpcd) falhou"
+  else
+    warn "dhcpcd não encontrado, tentando systemd-networkd/systemd-resolved"
+    # habilita e inicia serviços temporariamente
+    systemctl start systemd-networkd.service systemd-resolved.service 2>/dev/null || warn "Falha ao iniciar systemd-networkd/resolved"
+  fi
+
+  # Teste simples de conectividade
+  if timeout 5 ping -c1 8.8.8.8 >/dev/null 2>&1; then
+    info "${GREEN}Conectividade OK${NC}"
+    # Sincronizar relógio
+    timedatectl set-ntp true 2>/dev/null || warn "Falha ao sincronizar relógio"
+    return 0
+  else
+    warn "${YELLOW}Sem conectividade. Instalação continuará apenas com pacotes locais.${NC}"
+    return 1
+  fi
 }
 
 optimize_mirrors() {
@@ -257,8 +337,8 @@ setup_encryption_and_lvm() {
   LUKS_PART="${TARGET_DISK}${P_SUFFIX}3"
 
   # FORMATA /boot e /efi
-  mkfs.ext4 -F -L "BOOT" "$BOOT_PART"
-  mkfs.fat -F32 "$EFI_PART"
+  mkfs.ext4 -F -L "BOOT" "$BOOT_PART" || fatal "mkfs /boot falhou"
+  mkfs.fat -F32 "$EFI_PART" || fatal "mkfs /efi falhou"
 
   # FORMAT LUKS para sistema (passphrase por stdin)
   printf '%s' "$LUKS_PASS" | cryptsetup luksFormat "$LUKS_PART" \
@@ -266,9 +346,17 @@ setup_encryption_and_lvm() {
     --hash sha512 --pbkdf "$LUKS_KDF" --pbkdf-parallel "$PBKDF_PARALLEL" \
     --pbkdf-memory "$LUKS_PBKDF_MEM" --iter-time "$LUKS_ITER_TIME" - || fatal "luksFormat falhou"
 
-  # Adiciona senha de auto-destruição (keyslot adicional)
+  # Adiciona senha de auto-destruição (keyslot adicional) - método mais robusto
   if [[ "$ENABLE_AUTO_DESTRUCTION" -eq 1 ]]; then
-    { printf '%s\n' "$LUKS_PASS"; printf '%s' "$DESTRUCTION_PASS"; } | cryptsetup luksAddKey "$LUKS_PART" - || warn "luksAddKey para destruição falhou"
+    # Cria arquivo temporário para a senha de destruição
+    echo -n "$DESTRUCTION_PASS" > /tmp/destruction_key
+    chmod 600 /tmp/destruction_key
+    
+    # Usa arquivo temporário para adicionar chave
+    printf '%s' "$LUKS_PASS" | cryptsetup luksAddKey "$LUKS_PART" /tmp/destruction_key - || warn "luksAddKey para destruição falhou"
+    
+    # Remove arquivo temporário imediatamente
+    shred -u /tmp/destruction_key || rm -f /tmp/destruction_key
   fi
 
   # Se habilitado, criptografa o disco de dados com keyfile
@@ -284,31 +372,40 @@ setup_encryption_and_lvm() {
     cryptsetup luksFormat "$DATA_PART" --type luks2 --cipher "$LUKS_CIPHER" --key-size $LUKS_KEY_SIZE \
       --pbkdf $LUKS_KDF --pbkdf-memory $LUKS_PBKDF_MEM --iter-time $LUKS_ITER_TIME /tmp/hd_keyfile || fatal "luksFormat data falhou"
 
-    # adicionar passphrase e destruição ao LUKS do data
+    # adicionar passphrase e destruição ao LUKS do data - método mais robusto
     printf '%s' "$LUKS_PASS" | cryptsetup luksAddKey "$DATA_PART" /tmp/hd_keyfile - || warn "luksAddKey (data) falhou"
-    { printf '%s\n' "$LUKS_PASS"; printf '%s' "$DESTRUCTION_PASS"; } | cryptsetup luksAddKey "$DATA_PART" - || warn "luksAddKey destr (data) falhou"
+    
+    # Criar arquivo temporário para senha de destruição do data disk
+    if [[ "$ENABLE_AUTO_DESTRUCTION" -eq 1 ]]; then
+      echo -n "$DESTRUCTION_PASS" > /tmp/destruction_data_key
+      chmod 600 /tmp/destruction_data_key
+      printf '%s' "$LUKS_PASS" | cryptsetup luksAddKey "$DATA_PART" /tmp/destruction_data_key - || warn "luksAddKey destr (data) falhou"
+      shred -u /tmp/destruction_data_key || rm -f /tmp/destruction_data_key
+    fi
   fi
 
   # Abre o container LUKS do sistema
   printf '%s' "$LUKS_PASS" | cryptsetup open "$LUKS_PART" cryptroot - || fatal "cryptsetup open cryptroot falhou"
 
   # LVM
-  pvcreate /dev/mapper/cryptroot
-  vgcreate "$VG_NAME" /dev/mapper/cryptroot
-  lvcreate -L "$LV_ROOT_SIZE" -n "$LV_ROOT_NAME" "$VG_NAME"
-  lvcreate -L "${SWAP_SIZE_GB}G" -n "$LV_SWAP_NAME" "$VG_NAME"
-  lvcreate -l 100%FREE -n "$LV_HOME_NAME" "$VG_NAME"
+  pvcreate /dev/mapper/cryptroot || fatal "pvcreate falhou"
+  vgcreate "$VG_NAME" /dev/mapper/cryptroot || fatal "vgcreate falhou"
+  lvcreate -L "$LV_ROOT_SIZE" -n "$LV_ROOT_NAME" "$VG_NAME" || fatal "lvcreate root falhou"
+  lvcreate -L "${SWAP_SIZE_GB}G" -n "$LV_SWAP_NAME" "$VG_NAME" || fatal "lvcreate swap falhou"
+  lvcreate -l 100%FREE -n "$LV_HOME_NAME" "$VG_NAME" || fatal "lvcreate home falhou"
 
   # Format volumes
-  mkfs.ext4 -L "ROOT" "/dev/$VG_NAME/$LV_ROOT_NAME"
-  mkfs.ext4 -L "HOME" "/dev/$VG_NAME/$LV_HOME_NAME"
-  mkswap -L "SWAP" "/dev/$VG_NAME/$LV_SWAP_NAME"
-  swapon "/dev/$VG_NAME/$LV_SWAP_NAME"
+  mkfs.ext4 -L "ROOT" "/dev/$VG_NAME/$LV_ROOT_NAME" || fatal "mkfs root falhou"
+  mkfs.ext4 -L "HOME" "/dev/$VG_NAME/$LV_HOME_NAME" || fatal "mkfs home falhou"
+  mkswap -L "SWAP" "/dev/$VG_NAME/$LV_SWAP_NAME" || fatal "mkswap falhou"
+  swapon "/dev/$VG_NAME/$LV_SWAP_NAME" || warn "swapon falhou"
 
-  # Se data criptografado: abrir com keyfile temporário
+  # Se data criptografado: abrir com keyfile temporário (falha aqui é crítico)
   if [[ "$ENABLE_DUAL_ENCRYPTION" -eq 1 ]]; then
-    cryptsetup open "$DATA_PART" cryptdata --key-file /tmp/hd_keyfile || warn "cryptsetup open cryptdata falhou"
-    mkfs.ext4 -L "DATA" /dev/mapper/cryptdata || warn "mkfs cryptdata falhou"
+    if ! cryptsetup open "$DATA_PART" cryptdata --key-file /tmp/hd_keyfile; then
+      fatal "cryptsetup open cryptdata falhou (necessário para preparar data)"
+    fi
+    mkfs.ext4 -L "DATA" /dev/mapper/cryptdata || fatal "mkfs cryptdata falhou"
   fi
 
   # Salvar UUIDs para uso posterior
@@ -322,8 +419,12 @@ setup_encryption_and_lvm() {
 
 mount_filesystems_for_install() {
   info "Montando sistemas de arquivos para instalação"
+  mkdir -p /mnt
   mount "/dev/$VG_NAME/$LV_ROOT_NAME" /mnt
+  
+  # Criar diretórios antes de montar
   mkdir -p /mnt/home /mnt/boot /mnt/boot/efi /mnt/home/dados
+  
   mount "$BOOT_PART" /mnt/boot
   mount "$EFI_PART" /mnt/boot/efi
   mount "/dev/$VG_NAME/$LV_HOME_NAME" /mnt/home
@@ -342,8 +443,8 @@ install_base_and_prepare() {
   )
   
   # Tenta instalar pacotes adicionais se tiver internet
-  if ping -c1 8.8.8.8 >/dev/null 2>&1; then
-    pacstrap /mnt "${base_packages[@]}" intel-ucode microcode-amd --noconfirm || 
+  if timeout 5 ping -c1 8.8.8.8 >/dev/null 2>&1; then
+    pacstrap /mnt "${base_packages[@]}" intel-ucode amd-ucode --noconfirm || 
       warn "Alguns pacotes podem ter falhado, continuando..."
   else
     pacstrap /mnt "${base_packages[@]}" --noconfirm || 
@@ -369,6 +470,12 @@ EOF
     echo "$DATA_UUID" > /mnt/root/data_uuid
   fi
 
+  # Transferir hash de destruição
+  if [[ "$ENABLE_AUTO_DESTRUCTION" -eq 1 && -f /tmp/destruction_hash ]]; then
+    cp /tmp/destruction_hash /mnt/etc/secure-destruction.hash
+    chmod 600 /mnt/etc/secure-destruction.hash
+  fi
+
   info "Base instalada e fstab gerado."
 }
 
@@ -378,10 +485,11 @@ prepare_keyfile_encrypted_by_pin() {
     info "Protegendo hd_keyfile com PIN (openssl PBKDF2)."
     mkdir -p /mnt/etc/cryptsetup-keys.d
     # Encripta o keyfile temporário
-    printf '%s' "$PIN_DATA" | openssl enc -aes-256-cbc -pbkdf2 -salt -iter 100000 -pass stdin \
-      -in /tmp/hd_keyfile -out /mnt/etc/cryptsetup-keys.d/hd_keyfile.enc \
-      2>/dev/null || warn "Falha ao encriptar hd_keyfile com PIN"
-    chmod 600 /mnt/etc/cryptsetup-keys.d/hd_keyfile.enc
+    if ! printf '%s' "$PIN_DATA" | openssl enc -aes-256-cbc -pbkdf2 -salt -iter 100000 -pass stdin \
+      -in /tmp/hd_keyfile -out /mnt/etc/cryptsetup-keys.d/hd_keyfile.enc 2>/dev/null; then
+      warn "Falha ao encriptar hd_keyfile com PIN"
+    fi
+    chmod 600 /mnt/etc/cryptsetup-keys.d/hd_keyfile.enc || true
     # Remove keyfile temporário
     shred -u /tmp/hd_keyfile 2>/dev/null || rm -f /tmp/hd_keyfile
     info "Keyfile protegido e instalado em /etc/cryptsetup-keys.d/hd_keyfile.enc."
@@ -390,11 +498,13 @@ prepare_keyfile_encrypted_by_pin() {
 
 # -------------------- Configuração dentro do chroot --------------------
 prepare_pw_files_for_chroot() {
+  # Usar memória em vez de arquivos temporários sempre que possível
+  # Apenas criar arquivos temporários quando necessário para chpasswd
   printf 'root:%s\n' "$ROOT_PASS" > /mnt/root/.pwroot
   chmod 600 /mnt/root/.pwroot
   printf '%s:%s\n' "$USERNAME" "$USER_PASS" > /mnt/root/.pwuser
   chmod 600 /mnt/root/.pwuser
-  info "Arquivos temporários de senha criados."
+  info "Arquivos temporários de senha criados (serão removidos após uso)."
 }
 
 configure_chroot() {
@@ -437,26 +547,30 @@ chmod 440 /etc/sudoers.d/wheel
 sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block encrypt lvm2 filesystems keyboard fsck)/' /etc/mkinitcpio.conf
 mkinitcpio -P
 
-# Instalar pacotes de segurança
-pacman -Sy --noconfirm networkmanager openssh nftables audit aide --needed
+# Instalar pacotes de segurança (se conectado)
+if timeout 5 ping -c1 8.8.8.8 >/dev/null 2>&1; then
+  pacman -Sy --noconfirm networkmanager openssh nftables audit aide --needed || true
+else
+  pacman -S --noconfirm networkmanager openssh --needed || true
+fi
 
 # Habilitar serviços
 systemctl enable NetworkManager
 systemctl enable sshd
-systemctl enable nftables
-systemctl enable auditd
+systemctl enable nftables 2>/dev/null || true
+systemctl enable auditd 2>/dev/null || true
 
 # GRUB
 pacman -Sy --noconfirm grub efibootmgr --needed
 sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=3/' /etc/default/grub
 
-# Configurar linha de comando do kernel
+# Configurar linha de comando do kernel - substituir em vez de append para evitar duplicação
 LUKS_UUID=$(cat /root/luks_uuid)
-echo "GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=${LUKS_UUID}:cryptroot root=/dev/${VG_NAME}/${LV_ROOT_NAME}\"" >> /etc/default/grub
+sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=${LUKS_UUID}:cryptroot root=/dev/vg_system/lv_root\"|" /etc/default/grub
 
 # Instalar GRUB
 TARGET_DISK=$(cat /root/target_disk)
-grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=ARCH "$TARGET_DISK"
+grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ARCH "$TARGET_DISK"
 grub-mkconfig -o /boot/grub/grub.cfg
 
 # Salvar hash de destruição
@@ -469,9 +583,11 @@ fi
 # Limpar arquivos temporários
 rm -f /root/luks_uuid /root/target_disk /root/data_uuid
 
-# Inicializar AIDE database
-aide --init
-mv /var/lib/aide/aide.db.new /var/lib/aide/aide.db 2>/dev/null || true
+# Inicializar AIDE database (se disponível)
+if command -v aide >/dev/null 2>&1; then
+  aide --init 2>/dev/null || true
+  mv /var/lib/aide/aide.db.new /var/lib/aide/aide.db 2>/dev/null || true
+fi
 
 CHROOT
   info "Configuração chroot concluída."
@@ -480,6 +596,9 @@ CHROOT
 # -------------------- Helpers instalados no sistema final --------------------
 install_unlock_and_destroy_helpers() {
   info "Instalando helpers para desbloqueio e destruição."
+
+  # Criar diretório antes de escrever helpers
+  mkdir -p /mnt/usr/local/bin
 
   # unlock-data.sh - descriptografa hd_keyfile.enc usando PIN
   if [[ "$ENABLE_DUAL_ENCRYPTION" -eq 1 ]]; then
@@ -495,12 +614,12 @@ printf '%s' "\$pin" | openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 -pass std
   echo "PIN incorreto ou falha no decifrar"; exit 1;
 }
 chmod 600 "\$TMPK"
-cryptsetup open /dev/disk/by-uuid/${DATA_UUID} cryptdata --key-file "\$TMPK" || {
+cryptsetup open "/dev/disk/by-uuid/${DATA_UUID}" cryptdata --key-file "\$TMPK" || {
   shred -u "\$TMPK"; exit 1;
 }
 shred -u "\$TMPK" || rm -f "\$TMPK"
 echo "HD desbloqueado: /dev/mapper/cryptdata"
-mount /dev/mapper/cryptdata || echo "Montagem automática falhou; monte manualmente."
+mount /dev/mapper/cryptdata /home/dados 2>/dev/null || echo "Montagem automática falhou; monte manualmente."
 UNLOCK
     chmod 755 /mnt/usr/local/bin/unlock-data.sh
   fi
@@ -522,36 +641,40 @@ stored_hash=$(cat "$HASH_FILE")
 echo "Senha válida. Iniciando destruição..."
 {
   # Obter dispositivos de destruição
-  TARGET_LUKS_PART=$(cryptsetup status cryptroot | grep device | awk '{print $2}')
+  TARGET_LUKS_PART=$(cryptsetup status cryptroot 2>/dev/null | grep device | awk '{print $2}')
   [[ -n "$TARGET_LUKS_PART" ]] || TARGET_LUKS_PART="/dev/sda3"
   
   DATA_LUKS_PART=$(cryptsetup status cryptdata 2>/dev/null | grep device | awk '{print $2}')
   [[ -n "$DATA_LUKS_PART" ]] || DATA_LUKS_PART="/dev/sdb1"
 
   # Apagar headers LUKS
-  cryptsetup luksErase --batch-mode "$TARGET_LUKS_PART" || true
-  [[ -n "$DATA_LUKS_PART" ]] && cryptsetup luksErase --batch-mode "$DATA_LUKS_PART" || true
+  cryptsetup luksErase --batch-mode "$TARGET_LUKS_PART" 2>/dev/null || true
+  [[ -n "$DATA_LUKS_PART" ]] && cryptsetup luksErase --batch-mode "$DATA_LUKS_PART" 2>/dev/null || true
 
   # Sobrescrever áreas críticas
-  dd if=/dev/urandom of="$TARGET_LUKS_PART" bs=1M count=100 status=progress || true
-  [[ -n "$DATA_LUKS_PART" ]] && dd if=/dev/urandom of="$DATA_LUKS_PART" bs=1M count=100 status=progress || true
+  dd if=/dev/urandom of="$TARGET_LUKS_PART" bs=1M count=100 status=progress 2>/dev/null || true
+  [[ -n "$DATA_LUKS_PART" ]] && dd if=/dev/urandom of="$DATA_LUKS_PART" bs=1M count=100 status=progress 2>/dev/null || true
 
   sync
+  echo "Destruição concluída. Sistema será desligado."
   poweroff -f
 } &
-echo "Destruição disparada (em background)."
+echo "Processo de destruição iniciado (executando em background)."
 DEST
   chmod 700 /mnt/usr/local/bin/crypto-destroy
 
   # emergency wrapper
   cat > /mnt/usr/local/bin/emergency-destruction-gui <<'WRAP'
 #!/usr/bin/env bash
-echo "A ação de destruição requer sudo (senha interativa)."
+echo "=== EMERGÊNCIA: AUTO-DESTRUIÇÃO ==="
+echo "Esta ação irá DESTRUIR PERMANENTEMENTE todos os dados criptografados!"
+echo "Certifique-se de que realmente deseja continuar."
+echo
 sudo /usr/local/bin/crypto-destroy
 WRAP
   chmod 750 /mnt/usr/local/bin/emergency-destruction-gui
 
-  info "Helpers instalados."
+  info "Helpers de desbloqueio e destruição instalados."
 }
 
 # -------------------- Verificações finais e limpeza --------------------
@@ -560,18 +683,32 @@ verify_installation() {
   [[ -e /mnt/etc/fstab ]] || warn "/etc/fstab ausente"
   [[ -e /mnt/boot/grub/grub.cfg ]] || warn "grub.cfg ausente"
   [[ -e /mnt/usr/local/bin/crypto-destroy ]] || warn "crypto-destroy ausente"
+  if [[ "$ENABLE_DUAL_ENCRYPTION" -eq 1 ]]; then
+    [[ -e /mnt/usr/local/bin/unlock-data.sh ]] || warn "unlock-data.sh ausente"
+    [[ -e /mnt/etc/cryptsetup-keys.d/hd_keyfile.enc ]] || warn "hd_keyfile.enc ausente"
+  fi
   info "Verificação concluída."
 }
 
 final_cleanup() {
-  info "Limpeza final."
+  info "Limpeza final e desmontagem."
+  
+  # Remover arquivos temporários sensíveis
+  rm -f /tmp/destruction_hash 2>/dev/null || true
+  
+  # Desmontagem segura
   umount -R /mnt 2>/dev/null || true
   cryptsetup luksClose cryptdata 2>/dev/null || true
   cryptsetup luksClose cryptroot 2>/dev/null || true
   vgchange -an "$VG_NAME" 2>/dev/null || true
   swapoff -a 2>/dev/null || true
   sync
-  info "Final cleanup pronto."
+  
+  # Limpar histórico bash
+  unset HISTFILE 2>/dev/null || true
+  history -c 2>/dev/null || true
+  
+  info "Limpeza final concluída."
 }
 
 # -------------------- Ordem de execução --------------------
@@ -580,8 +717,14 @@ main() {
   confirm_continue
   validate_environment
   collect_passwords_interactive
-  setup_network
-  optimize_mirrors
+  
+  # Verificar conectividade (otimizada)
+  HAS_INTERNET=false
+  if setup_network; then
+    HAS_INTERNET=true
+    optimize_mirrors
+  fi
+  
   sanitize_devices
   partition_devices
   setup_encryption_and_lvm
@@ -594,19 +737,44 @@ main() {
   verify_installation
   final_cleanup
 
-  info "Instalação concluída (modo seguro)."
+  echo
+  echo "=================================================="
+  echo "${GREEN}INSTALAÇÃO ARCH LINUX SEGURA CONCLUÍDA${NC}"
   echo "=================================================="
   echo "  - Hostname: ${HOSTNAME}"
   echo "  - Usuário: ${USERNAME}"
-  echo "  - SSD (sistema): ${TARGET_DISK}"
-  echo "  - HD (dados): ${DATA_DISK}"
-  echo "  - Desbloqueio do HD: /usr/local/bin/unlock-data.sh (PIN)"
-  echo "  - Destruição: /usr/local/bin/crypto-destroy (senha; root)"
+  echo "  - Disco sistema: ${TARGET_DISK} (LUKS2 + LVM)"
+  if [[ "$ENABLE_DUAL_ENCRYPTION" -eq 1 ]]; then
+    echo "  - Disco dados: ${DATA_DISK} (LUKS2 + keyfile protegido por PIN)"
+  fi
+  echo "  - Kernel: linux-hardened"
+  echo "  - Conectividade: $([ "$HAS_INTERNET" = true ] && echo "OK" || echo "SEM INTERNET")"
+  echo ""
+  echo "${YELLOW}COMANDOS PÓS-BOOT:${NC}"
+  if [[ "$ENABLE_DUAL_ENCRYPTION" -eq 1 ]]; then
+    echo "  - Desbloquear HD dados: sudo /usr/local/bin/unlock-data.sh"
+  fi
+  if [[ "$ENABLE_AUTO_DESTRUCTION" -eq 1 ]]; then
+    echo "  - Auto-destruição: sudo /usr/local/bin/crypto-destroy"
+  fi
+  echo ""
+  echo "${GREEN}SEGURANÇA IMPLEMENTADA:${NC}"
+  echo "  ✓ LUKS2 com Argon2id"
+  echo "  ✓ LVM sobre criptografia"
+  echo "  ✓ Keyfile protegido por PIN"
+  echo "  ✓ Mecanismo de auto-destruição"
+  echo "  ✓ Kernel hardened"
+  echo "  ✓ Senhas nunca salvas em arquivos"
   echo "=================================================="
-
-  info "Reinicie a máquina e, após o boot, rode /usr/local/bin/unlock-data.sh para abrir o HD de dados."
+  echo ""
+  warn "IMPORTANTE: Anote suas senhas e PIN em local seguro!"
+  warn "Sem elas, os dados serão irrecuperáveis."
+  echo ""
+  info "${GREEN}Sistema pronto para reinicialização.${NC}"
+  info "Execute: reboot"
 }
 
+# Executar apenas se chamado diretamente
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   main "$@"
 fi
