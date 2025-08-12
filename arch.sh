@@ -1,20 +1,38 @@
 #!/usr/bin/env bash
 #
-# Archmonkey - Secure Arch Linux Installer
-# Versão modificada com funcionalidades avançadas de segurança e automação.
+# install-arch-secure.sh
+#
+# Instalador robusto e seguro para Arch Linux com foco em criptografia
+# completa, LVM, e funcionalidades de segurança física como auto-destruição.
+#
+# VERSÃO: 2.0
 #
 set -euo pipefail
 IFS=$'\n\t'
 
-# --- CORES E LOGGING ---
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# =============================================================================
+# --- CONFIGURAÇÕES DO USUÁRIO ---
+# (Podem ser sobrescritas por variáveis de ambiente)
+# =============================================================================
 
-# -------------------- OPÇÕES DE CONFIGURAÇÃO --------------------
-# --- GERAL ---
+# Defina como 1 para visualizar senhas ao digitar. DESATIVA o log em arquivo.
+SHOW_PASSWORDS="${SHOW_PASSWORDS:-0}"
+
+# Discos alvo. Ex: TARGET_DISK="/dev/nvme0n1"
+TARGET_DISK="${TARGET_DISK:-/dev/sda}"
+DATA_DISK="${DATA_DISK:-/dev/sdb}" # Usado apenas se ENABLE_DUAL_ENCRYPTION=1
+
+# Habilita um segundo disco criptografado para dados.
+ENABLE_DUAL_ENCRYPTION="${ENABLE_DUAL_ENCRYPTION:-0}"
+# Habilita o mecanismo de auto-destruição com senha.
+ENABLE_AUTO_DESTRUCTION="${ENABLE_AUTO_DESTRUCTION:-1}"
+
+# Particionamento (em MiB)
+EFI_SIZE_MIB=512
+BOOT_SIZE_MIB=1024
+SWAP_SIZE_GB=4 # Em GiB
+
+# Configurações do sistema
 HOSTNAME="arch-secure"
 TIMEZONE="America/Sao_Paulo"
 LOCALE="pt_BR.UTF-8"
@@ -22,425 +40,533 @@ KEYMAP="br-abnt2"
 USERNAME="operador"
 USER_SHELL="/bin/bash"
 
-# --- DISCOS E PARTIÇÕES ---
-# AVISO: Nomes como /dev/sdX podem mudar. Use /dev/disk/by-id/... para máxima robustez.
-TARGET_DISK="${TARGET_DISK:-/dev/sda}"
-DATA_DISK="${DATA_DISK:-/dev/sdb}"
-
-EFI_SIZE_MIB=512
-BOOT_SIZE_MIB=1024
-## AJUSTE: O swap será um arquivo, não uma partição. Definimos o tamanho aqui.
-SWAP_FILE_SIZE_GB=4
-
-# --- CRIPTOGRAFIA E LVM ---
-ENABLE_DUAL_ENCRYPTION=1
+# Parâmetros de criptografia LUKS (fortes)
 LUKS_CIPHER="aes-xts-plain64"
 LUKS_KEY_SIZE=512
 LUKS_KDF="argon2id"
-LUKS_PBKDF_MEM=65536
-LUKS_ITER_TIME=2000
-PBKDF_PARALLEL=2
+LUKS_PBKDF_MEM=1048576 # 1GiB de RAM para KDF
+LUKS_ITER_TIME=4000
+PBKDF_PARALLEL=4
+
+# Nomes LVM
 VG_NAME="vg_system"
 LV_ROOT_NAME="lv_root"
-# ## AJUSTE: Volume de swap removido do LVM.
+LV_SWAP_NAME="lv_swap"
 LV_HOME_NAME="lv_home"
 LV_ROOT_SIZE="30G"
 
-# --- SEGURANÇA E AUTODESTRUIÇÃO ---
-ENABLE_AUTO_DESTRUCTION=1
-DESTRUCTION_WEBHOOK_URL="${DESTRUCTION_WEBHOOK_URL:-}"
+# URL para backup de log em caso de falha (ex: "scp://user@host:/path/to/logs/")
 REMOTE_BACKUP_URL="${REMOTE_BACKUP_URL:-}"
 
-## MELHORIA: Opções de performance e segurança adicionais.
-KERNEL_PACKAGE="linux-zen" # Use "linux" para o padrão, "linux-lts" para suporte longo, ou "linux-zen" para performance.
-ENABLE_ZRAM=1              # 1 para usar ZRAM (recomendado para baixa RAM), 0 para usar swap em arquivo.
-ENABLE_USBGUARD=1          # 1 para instalar e habilitar o USBGuard (requer configuração pós-instalação).
-
-# --- PACOTES ---
-EXTRA_PKGS_FILE="pkglist.txt"
-EXTRA_PKGS_ENV="${EXTRA_PKGS_ENV:-}"
-DESKTOP_ENVIRONMENT_PACKAGES="i3-wm i3status dmenu terminator xorg-server xorg-xinit xbindkeys zenity polkit"
-
-# --- DEBUG ---
-SHOW_PASSWORDS="${SHOW_PASSWORDS:-0}"
-
-# --- SENHAS (podem ser passadas por variável de ambiente para automação) ---
+# Senhas (podem ser passadas via ambiente para automação)
 LUKS_PASS="${LUKS_PASS:-}"
 DESTRUCTION_PASS="${DESTRUCTION_PASS:-}"
 ROOT_PASS="${ROOT_PASS:-}"
 USER_PASS="${USER_PASS:-}"
 PIN_DATA="${PIN_DATA:-}"
 
-# -------------------- LOGGING SEGURO --------------------
-if [[ "$SHOW_PASSWORDS" -eq 1 ]]; then
-  LOGFILE="/dev/null"
-else
-  LOGFILE="/var/log/arch_install.log"
-  mkdir -p /var/log
-fi
+# =============================================================================
+# --- INÍCIO DO SCRIPT ---
+# =============================================================================
 
-if [[ "$LOGFILE" != "/dev/null" ]]; then
-  >"$LOGFILE"
-  chmod 600 "$LOGFILE"
-fi
-exec > >(tee -a "$LOGFILE") 2>&1
+# --- Variáveis Globais e Helpers ---
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
+LOGFILE="/var/log/install-arch-secure.log"
+BOOT_MODE="" # Será definido automaticamente
 
-# -------------------- FUNÇÕES AUXILIARES --------------------
 info() { printf "${BLUE}[INFO]${NC} %s\n" "$*"; }
 warn() { printf "${YELLOW}[AVISO]${NC} %s\n" "$*"; }
 err() { printf "${RED}[ERRO]${NC} %s\n" "$*"; }
-fatal() {
-  err "$*"
-  exit 1
-}
-require_root() { ((EUID == 0)) || fatal "Este script deve ser executado como root."; }
+fatal() { err "$*"; exit 1; }
+require_root() { (( EUID == 0 )) || fatal "Este script deve ser executado como root."; }
 
-# ... (Funções show_help, secure_cleanup, mask_secret, display_passwords_for_confirmation, collect_passwords_interactive, validate_environment, setup_network_and_keys, sanitize_devices, part_suffix, partition_devices permanecem praticamente as mesmas) ...
-# Apenas pequenas alterações serão feitas nas funções relevantes abaixo.
+# --- Funções de Segurança e Limpeza ---
 
-# ... (Cole aqui as funções inalteradas do seu script original para manter a completude)
-# show_help, secure_cleanup, mask_secret, display_passwords_for_confirmation, collect_passwords_interactive, validate_environment, setup_network_and_keys, sanitize_devices, part_suffix, partition_devices
-
-setup_encryption_and_lvm() {
-  local p
-  p=$(part_suffix "$TARGET_DISK")
-  local system_partition="${TARGET_DISK}${p}3"
-
-  info "Configurando criptografia LUKS no disco do sistema..."
-  echo -n "$LUKS_PASS" | cryptsetup luksFormat \
-    --type luks2 --cipher "$LUKS_CIPHER" --key-size "$LUKS_KEY_SIZE" \
-    --pbkdf "$LUKS_KDF" --pbkdf-memory "$LUKS_PBKDF_MEM" --iter-time "$LUKS_ITER_TIME" \
-    --pbkdf-parallel "$PBKDF_PARALLEL" --label "cryptroot" --batch-mode "$system_partition"
-
-  info "Desbloqueando partição LUKS do sistema..."
-  echo -n "$LUKS_PASS" | cryptsetup open "$system_partition" cryptroot
-
-  info "Configurando LVM sobre LUKS..."
-  pvcreate /dev/mapper/cryptroot
-  vgcreate "$VG_NAME" /dev/mapper/cryptroot
-  lvcreate -L "$LV_ROOT_SIZE" -n "$LV_ROOT_NAME" "$VG_NAME"
-  ## AJUSTE: Volume de swap removido do LVM.
-  lvcreate -l '100%FREE' -n "$LV_HOME_NAME" "$VG_NAME"
-
-  info "Formatando volumes LVM..."
-  mkfs.ext4 "/dev/$VG_NAME/$LV_ROOT_NAME"
-  mkfs.ext4 "/dev/$VG_NAME/$LV_HOME_NAME"
-  ## AJUSTE: mkswap removido daqui.
-
-  if [[ "$ENABLE_DUAL_ENCRYPTION" -eq 1 ]]; then
-    local p_data
-    p_data=$(part_suffix "$DATA_DISK")
-    local data_partition="${DATA_DISK}${p_data}1"
-    info "Configurando criptografia LUKS no disco de dados..."
-    dd if=/dev/urandom of=/tmp/hd_keyfile bs=64 count=1
-    chmod 600 /tmp/hd_keyfile
-    cryptsetup luksFormat --type luks2 --cipher "$LUKS_CIPHER" --key-size "$LUKS_KEY_SIZE" \
-      --label "cryptdata" --key-file /tmp/hd_keyfile --batch-mode "$data_partition"
-    info "Formatando partição de dados (ext4)..."
-    cryptsetup open "$data_partition" cryptdata --key-file /tmp/hd_keyfile
-    mkfs.ext4 /dev/mapper/cryptdata
-    cryptsetup close cryptdata
-  fi
+secure_cleanup() {
+    info "Executando limpeza segura de dados sensíveis..."
+    unset LUKS_PASS DESTRUCTION_PASS ROOT_PASS USER_PASS PIN_DATA || true
+    shred -vfzu -n 3 /tmp/hd_keyfile /tmp/destruction_hash /tmp/.pwroot /tmp/.pwuser &>/dev/null || true
+    rm -f /tmp/hd_keyfile /tmp/destruction_hash /tmp/.pwroot /tmp/.pwuser &>/dev/null || true
+    unset HISTFILE 2>/dev/null || true
+    history -c 2>/dev/null || true
 }
 
-mount_filesystems_for_install() {
-  info "Montando sistemas de arquivos..."
-  local p
-  p=$(part_suffix "$TARGET_DISK")
-  mount "/dev/$VG_NAME/$LV_ROOT_NAME" /mnt
-  mkdir -p /mnt/home
-  mount "/dev/$VG_NAME/$LV_HOME_NAME" /mnt/home
-  ## AJUSTE: swapon removido daqui. O swap será configurado dentro do chroot.
-  mkdir -p /mnt/boot
-  mount "${TARGET_DISK}${p}2" /mnt/boot
-  if [[ "$BOOT_MODE" == "UEFI" ]]; then
+backup_log_on_failure() {
+    local exit_code=$?
+    if [[ "$exit_code" -ne 0 && -n "$REMOTE_BACKUP_URL" && -f "$LOGFILE" ]]; then
+        warn "O script falhou. Tentando enviar log de erro para o servidor de backup..."
+        # Exemplo usando curl para SCP. Adapte conforme necessário.
+        if command -v curl &>/dev/null; then
+            curl --insecure --upload-file "$LOGFILE" "$REMOTE_BACKUP_URL/$(basename "$LOGFILE").$(date +%s).log" || \
+            warn "Falha ao enviar o log de erro."
+        else
+            warn "Comando 'curl' não encontrado para enviar o log."
+        fi
+    fi
+    secure_cleanup
+}
+
+trap backup_log_on_failure EXIT
+trap secure_cleanup INT TERM
+
+# --- Funções de Validação e Preparação ---
+
+show_help() {
+    echo "Uso: $0 [-h|--help]"
+    echo
+    echo "Instalador seguro e automatizado para Arch Linux."
+    echo "AVISO: Este script DESTRUIRÁ todos os dados nos discos especificados."
+    echo
+    echo "Opções:"
+    echo "  -h, --help    Mostra esta mensagem de ajuda."
+    echo
+    echo "Variáveis de Ambiente para Configuração:"
+    echo "  TARGET_DISK: Disco principal para o sistema (padrão: /dev/sda)."
+    echo "  ENABLE_DUAL_ENCRYPTION: 1 para habilitar um segundo disco de dados (padrão: 0)."
+    echo "  DATA_DISK: Disco para dados se a opção acima for 1 (padrão: /dev/sdb)."
+    echo "  ENABLE_AUTO_DESTRUCTION: 1 para habilitar a senha de autodestruição (padrão: 1)."
+    echo "  SHOW_PASSWORDS: 1 para exibir senhas ao digitar (desativa log em arquivo)."
+    echo "  LUKS_PASS, ROOT_PASS, etc.: Para fornecer senhas de forma não interativa."
+    echo "  REMOTE_BACKUP_URL: URL (ex: scp://user@host:/path/) para enviar logs em caso de falha."
+    echo
+    echo "Exemplo de uso automatizado:"
+    echo "  export TARGET_DISK=/dev/nvme0n1 LUKS_PASS='secret' ROOT_PASS='secret' USER_PASS='secret' && ./$0"
+    echo
+}
+
+check_dependencies() {
+    info "Verificando dependências..."
+    local missing=()
+    local tools=(cryptsetup lvm sgdisk mkfs.ext4 mkfs.fat pacstrap genfstab arch-chroot partprobe wipefs dd grub-install grub-mkconfig openssl curl)
+    for tool in "${tools[@]}"; do
+        command -v "$tool" &>/dev/null || missing+=("$tool")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        fatal "Ferramentas essenciais não encontradas: ${missing[*]}. Instale-as no ambiente live."
+    fi
+}
+
+check_network() {
+    info "Verificando conectividade de rede..."
+    if ! ping -c 1 -W 3 archlinux.org &>/dev/null; then
+        fatal "Sem conexão com a internet. A instalação não pode continuar."
+    fi
+    info "✓ Conexão com a internet ativa."
+    timedatectl set-ntp true
+}
+
+validate_critical_vars() {
+    info "Validando variáveis críticas..."
+    [[ -n "$TARGET_DISK" ]] || fatal "A variável TARGET_DISK não está definida."
+    [[ -b "$TARGET_DISK" ]] || fatal "Disco alvo $TARGET_DISK não é um dispositivo de bloco válido."
+
+    if (( ENABLE_DUAL_ENCRYPTION == 1 )); then
+        [[ -n "$DATA_DISK" ]] || fatal "ENABLE_DUAL_ENCRYPTION=1, mas DATA_DISK não está definida."
+        [[ -b "$DATA_DISK" ]] || fatal "Disco de dados $DATA_DISK não é um dispositivo de bloco válido."
+        [[ "$TARGET_DISK" != "$DATA_DISK" ]] || fatal "TARGET_DISK e DATA_DISK não podem ser o mesmo dispositivo."
+    fi
+
+    # Validação de senhas apenas se fornecidas via env
+    if [[ -n "${LUKS_PASS:-}" ]]; then
+        [[ -n "$ROOT_PASS" && -n "$USER_PASS" ]] || fatal "Se LUKS_PASS é fornecida, ROOT_PASS e USER_PASS também devem ser."
+        if (( ENABLE_AUTO_DESTRUCTION == 1 )); then
+            [[ -n "$DESTRUCTION_PASS" ]] || fatal "Autodestruição habilitada, mas DESTRUCTION_PASS não foi fornecida."
+            [[ "$LUKS_PASS" != "$DESTRUCTION_PASS" ]] || fatal "A senha de destruição deve ser diferente da senha LUKS."
+        fi
+        if (( ENABLE_DUAL_ENCRYPTION == 1 )); then
+            [[ -n "$PIN_DATA" ]] || fatal "Criptografia dupla habilitada, mas PIN_DATA não foi fornecido."
+        fi
+    fi
+}
+
+detect_boot_mode() {
+    if [[ -d /sys/firmware/efi/efivars ]]; then
+        BOOT_MODE="UEFI"
+        info "✓ Sistema iniciado em modo UEFI."
+    else
+        BOOT_MODE="LEGACY"
+        fatal "Este script suporta apenas instalações em modo UEFI."
+    fi
+}
+
+# --- Funções Principais da Instalação ---
+
+collect_passwords() {
+    # Se as senhas foram passadas por env, pula a coleta interativa
+    if [[ -n "$LUKS_PASS" ]]; then
+        info "Senhas fornecidas por variáveis de ambiente. Pulando coleta interativa."
+        return 0
+    fi
+
+    info "Iniciando coleta interativa de senhas..."
+    local read_opts_vis="-p"
+    local read_opts_invis="-sp"
+
+    while true; do
+        # Senha LUKS
+        read ${SHOW_PASSWORDS:+-p} ${SHOW_PASSWORDS:- -sp} "Senha LUKS (principal): " LUKS_PASS; echo
+        read ${SHOW_PASSWORDS:+-p} ${SHOW_PASSWORDS:- -sp} "Confirme a senha LUKS: " tmp_pass; echo
+        if [[ "$LUKS_PASS" != "$tmp_pass" || -z "$LUKS_PASS" ]]; then warn "Senhas LUKS não coincidem ou estão vazias. Tente novamente."; continue; fi
+
+        # Senha de Destruição
+        if (( ENABLE_AUTO_DESTRUCTION == 1 )); then
+            read ${SHOW_PASSWORDS:+-p} ${SHOW_PASSWORDS:- -sp} "Senha de AUTO-DESTRUIÇÃO: " DESTRUCTION_PASS; echo
+            read ${SHOW_PASSWORDS:+-p} ${SHOW_PASSWORDS:- -sp} "Confirme a senha de destruição: " tmp_pass; echo
+            if [[ "$DESTRUCTION_PASS" != "$tmp_pass" || -z "$DESTRUCTION_PASS" ]]; then warn "Senhas de destruição não coincidem ou estão vazias."; continue; fi
+            if [[ "$DESTRUCTION_PASS" == "$LUKS_PASS" ]]; then warn "Senha de destruição deve ser diferente da senha LUKS."; continue; fi
+        fi
+
+        # Senha Root
+        read ${SHOW_PASSWORDS:+-p} ${SHOW_PASSWORDS:- -sp} "Senha do usuário 'root': " ROOT_PASS; echo
+        read ${SHOW_PASSWORDS:+-p} ${SHOW_PASSWORDS:- -sp} "Confirme a senha 'root': " tmp_pass; echo
+        if [[ "$ROOT_PASS" != "$tmp_pass" || -z "$ROOT_PASS" ]]; then warn "Senhas de root não coincidem ou estão vazias."; continue; fi
+
+        # Senha do Usuário
+        read ${SHOW_PASSWORDS:+-p} ${SHOW_PASSWORDS:- -sp} "Senha do usuário '$USERNAME': " USER_PASS; echo
+        read ${SHOW_PASSWORDS:+-p} ${SHOW_PASSWORDS:- -sp} "Confirme a senha do usuário: " tmp_pass; echo
+        if [[ "$USER_PASS" != "$tmp_pass" || -z "$USER_PASS" ]]; then warn "Senhas do usuário não coincidem ou estão vazias."; continue; fi
+
+        # PIN do Disco de Dados
+        if (( ENABLE_DUAL_ENCRYPTION == 1 )); then
+            read ${SHOW_PASSWORDS:+-p} ${SHOW_PASSWORDS:- -sp} "PIN para o disco de dados: " PIN_DATA; echo
+            read ${SHOW_PASSWORDS:+-p} ${SHOW_PASSWORDS:- -sp} "Confirme o PIN: " tmp_pass; echo
+            if [[ "$PIN_DATA" != "$tmp_pass" || -z "$PIN_DATA" ]]; then warn "PINs não coincidem ou estão vazios."; continue; fi
+        fi
+
+        info "Senhas coletadas."
+        break
+    done
+}
+
+prepare_for_destruction() {
+    info "Limpando discos alvo..."
+    local disks_to_clean=("$TARGET_DISK")
+    (( ENABLE_DUAL_ENCRYPTION == 1 )) && disks_to_clean+=("$DATA_DISK")
+
+    for disk in "${disks_to_clean[@]}"; do
+        info "Limpando $disk..."
+        # Desmonta quaisquer partições montadas do disco
+        umount -R "${disk}"* &>/dev/null || true
+        # Fecha quaisquer volumes LUKS/LVM
+        cryptsetup close /dev/mapper/"$(basename "${disk}")"* &>/dev/null || true
+        vgchange -an &>/dev/null || true
+        # Apaga assinaturas e tabela de partição
+        wipefs -a "$disk"
+        sgdisk --zap-all "$disk"
+    done
+    partprobe
+    sleep 2
+}
+
+partition_and_format() {
+    info "Particionando e formatando os discos..."
+    local p_suffix; p_suffix=$( [[ "$TARGET_DISK" =~ nvme|mmcblk ]] && echo "p" || echo "" )
+    local efi_part="${TARGET_DISK}${p_suffix}1"
+    local boot_part="${TARGET_DISK}${p_suffix}2"
+    local luks_part="${TARGET_DISK}${p_suffix}3"
+
+    sgdisk -n 1:0:+${EFI_SIZE_MIB}M -t 1:ef00 -c 1:"EFI System" "$TARGET_DISK"
+    sgdisk -n 2:0:+${BOOT_SIZE_MIB}M -t 2:8300 -c 2:"Boot" "$TARGET_DISK"
+    sgdisk -n 3:0:0               -t 3:8e00 -c 3:"LVM System" "$TARGET_DISK" # 8e00 é Linux LVM
+    partprobe "$TARGET_DISK"
+    sleep 1
+
+    mkfs.fat -F32 "$efi_part"
+    mkfs.ext4 -F "$boot_part"
+
+    if (( ENABLE_DUAL_ENCRYPTION == 1 )); then
+        local p_data_suffix; p_data_suffix=$( [[ "$DATA_DISK" =~ nvme|mmcblk ]] && echo "p" || echo "" )
+        local data_luks_part="${DATA_DISK}${p_data_suffix}1"
+        sgdisk -n 1:0:0 -t 1:8300 -c 1:"LUKS Data" "$DATA_DISK"
+        partprobe "$DATA_DISK"
+    fi
+}
+
+setup_luks_and_lvm() {
+    info "Configurando criptografia LUKS e LVM..."
+    local p_suffix; p_suffix=$( [[ "$TARGET_DISK" =~ nvme|mmcblk ]] && echo "p" || echo "" )
+    local luks_part="${TARGET_DISK}${p_suffix}3"
+
+    echo -n "$LUKS_PASS" | cryptsetup luksFormat --type luks2 --cipher "$LUKS_CIPHER" --key-size "$LUKS_KEY_SIZE" \
+        --pbkdf "$LUKS_KDF" --pbkdf-memory "$LUKS_PBKDF_MEM" --iter-time "$LUKS_ITER_TIME" \
+        --pbkdf-parallel "$PBKDF_PARALLEL" --label "cryptsystem" --batch-mode "$luks_part"
+
+    echo -n "$LUKS_PASS" | cryptsetup open "$luks_part" cryptroot
+
+    pvcreate /dev/mapper/cryptroot
+    vgcreate "$VG_NAME" /dev/mapper/cryptroot
+    lvcreate -L "$LV_ROOT_SIZE" -n "$LV_ROOT_NAME" "$VG_NAME"
+    lvcreate -L "${SWAP_SIZE_GB}G" -n "$LV_SWAP_NAME" "$VG_NAME"
+    lvcreate -l '100%FREE' -n "$LV_HOME_NAME" "$VG_NAME"
+
+    mkfs.ext4 "/dev/$VG_NAME/$LV_ROOT_NAME"
+    mkfs.ext4 "/dev/$VG_NAME/$LV_HOME_NAME"
+    mkswap "/dev/$VG_NAME/$LV_SWAP_NAME"
+
+    if (( ENABLE_DUAL_ENCRYPTION == 1 )); then
+        info "Configurando criptografia no disco de dados..."
+        local p_data_suffix; p_data_suffix=$( [[ "$DATA_DISK" =~ nvme|mmcblk ]] && echo "p" || echo "" )
+        local data_luks_part="${DATA_DISK}${p_data_suffix}1"
+        
+        dd if=/dev/random of=/tmp/hd_keyfile bs=64 count=1
+        chmod 600 /tmp/hd_keyfile
+        
+        cryptsetup luksFormat --type luks2 --cipher "$LUKS_CIPHER" --key-size "$LUKS_KEY_SIZE" \
+            --label "cryptdata" --key-file /tmp/hd_keyfile --batch-mode "$data_luks_part"
+        
+        cryptsetup open "$data_luks_part" cryptdata --key-file /tmp/hd_keyfile
+        mkfs.ext4 /dev/mapper/cryptdata
+        cryptsetup close cryptdata
+    fi
+}
+
+mount_filesystems() {
+    info "Montando sistemas de arquivos para instalação..."
+    local p_suffix; p_suffix=$( [[ "$TARGET_DISK" =~ nvme|mmcblk ]] && echo "p" || echo "" )
+    mount "/dev/$VG_NAME/$LV_ROOT_NAME" /mnt
+    mkdir -p /mnt/{boot,home}
+    mount "/dev/$VG_NAME/$LV_HOME_NAME" /mnt/home
+    mount "${TARGET_DISK}${p_suffix}2" /mnt/boot
     mkdir -p /mnt/boot/efi
-    mount "${TARGET_DISK}${p}1" /mnt/boot/efi
-  fi
-  [[ "$ENABLE_DUAL_ENCRYPTION" -eq 1 ]] && mkdir -p /mnt/data
-  info "Sistemas de arquivos montados com sucesso."
+    mount "${TARGET_DISK}${p_suffix}1" /mnt/boot/efi
+    swapon "/dev/$VG_NAME/$LV_SWAP_NAME"
 }
 
-build_package_list() {
-  ## MELHORIA: Adiciona pacotes de kernel, zram, usbguard e memwiper.
-  local base_pkgs="base base-devel ${KERNEL_PACKAGE} ${KERNEL_PACKAGE}-headers linux-firmware lvm2 grub sudo nano networkmanager openssl ufw curl git"
-  [[ "$BOOT_MODE" == "UEFI" ]] && base_pkgs+=" efibootmgr"
+install_system() {
+    info "Instalando sistema base com pacstrap..."
+    pacstrap /mnt base base-devel linux linux-firmware lvm2 grub efibootmgr sudo nano networkmanager openssl curl
 
-  local extra_pkgs=""
-  if [[ -n "$EXTRA_PKGS_ENV" ]]; then
-    info "Usando lista de pacotes da variável de ambiente EXTRA_PKGS_ENV."
-    extra_pkgs="$EXTRA_PKGS_ENV"
-  elif [[ -f "$EXTRA_PKGS_FILE" ]]; then
-    info "Lendo lista de pacotes de $EXTRA_PKGS_FILE."
-    extra_pkgs=$(cat "$EXTRA_PKGS_FILE" | grep -v '^#' | tr '\n' ' ')
-  fi
+    info "Gerando fstab..."
+    genfstab -U /mnt >> /mnt/etc/fstab
+}
 
-  local security_pkgs="mokutil sbctl memwiper"
-  [[ "$ENABLE_USBGUARD" -eq 1 ]] && security_pkgs+=" usbguard"
-  
-  local perf_pkgs=""
-  [[ "$ENABLE_ZRAM" -eq 1 ]] && perf_pkgs+=" zram-generator"
+prepare_chroot_data() {
+    info "Preparando dados para o ambiente chroot..."
+    local p_suffix; p_suffix=$( [[ "$TARGET_DISK" =~ nvme|mmcblk ]] && echo "p" || echo "" )
+    local luks_part="${TARGET_DISK}${p_suffix}3"
     
-  echo "$base_pkgs $DESKTOP_ENVIRONMENT_PACKAGES $security_pkgs $perf_pkgs $extra_pkgs"
+    # Salva UUIDs para uso dentro do chroot
+    blkid -s UUID -o value "$luks_part" > /mnt/root/system_luks_uuid.txt
+    
+    if (( ENABLE_DUAL_ENCRYPTION == 1 )); then
+        local p_data_suffix; p_data_suffix=$( [[ "$DATA_DISK" =~ nvme|mmcblk ]] && echo "p" || echo "" )
+        local data_luks_part="${DATA_DISK}${p_data_suffix}1"
+        blkid -s UUID -o value "$data_luks_part" > /mnt/root/data_luks_uuid.txt
+        
+        # Criptografa o keyfile do disco de dados com o PIN
+        mkdir -p /mnt/etc/cryptsetup-keys.d
+        echo -n "$PIN_DATA" | openssl enc -e -aes-256-cbc -pbkdf2 -iter 100000 \
+            -pass stdin -in /tmp/hd_keyfile -out /mnt/etc/cryptsetup-keys.d/data_disk.key.enc
+        chmod 600 /mnt/etc/cryptsetup-keys.d/data_disk.key.enc
+    fi
+
+    if (( ENABLE_AUTO_DESTRUCTION == 1 )); then
+        # Salva o hash da senha de destruição
+        mkdir -p /mnt/etc/secure
+        printf '%s' "$DESTRUCTION_PASS" | sha256sum | awk '{print $1}' > /mnt/etc/secure/destruction.hash
+        chmod 600 /mnt/etc/secure/destruction.hash
+    fi
+
+    # Passa senhas de forma segura para o chroot
+    echo -n "$ROOT_PASS" > /mnt/root/.pwroot
+    echo -n "$USER_PASS" > /mnt/root/.pwuser
+    chmod 600 /mnt/root/.pwroot /mnt/root/.pwuser
 }
 
-# ... (install_base_system e prepare_for_chroot permanecem os mesmos) ...
+configure_chroot() {
+    info "Configurando o sistema instalado (chroot)..."
+    arch-chroot /mnt /bin/bash -s -- \
+        "$HOSTNAME" "$TIMEZONE" "$LOCALE" "$KEYMAP" "$USERNAME" "$USER_SHELL" "$VG_NAME" <<'CHROOT_SCRIPT'
+    set -euo pipefail
+    
+    HOSTNAME="$1"
+    TIMEZONE="$2"
+    LOCALE="$3"
+    KEYMAP="$4"
+    USERNAME="$5"
+    USER_SHELL="$6"
+    VG_NAME="$7"
 
-configure_system_chroot() {
-  info "Criando script de configuração para o chroot..."
-  cat >/mnt/chroot-config.sh <<CHROOT_SCRIPT
+    # Configurações básicas
+    ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
+    hwclock --systohc
+    sed -i "s/^#$LOCALE/$LOCALE/" /etc/locale.gen
+    locale-gen
+    echo "LANG=$LOCALE" > /etc/locale.conf
+    echo "KEYMAP=$KEYMAP" > /etc/vconsole.conf
+    echo "$HOSTNAME" > /etc/hostname
+    echo "127.0.0.1 localhost" >> /etc/hosts
+    echo "::1       localhost" >> /etc/hosts
+    echo "127.0.1.1 $HOSTNAME.localdomain $HOSTNAME" >> /etc/hosts
+
+    # Configura senhas e usuário
+    chpasswd < /root/.pwroot
+    useradd -m -s "$USER_SHELL" -G wheel "$USERNAME"
+    echo "$USERNAME:$(cat /root/.pwuser)" | chpasswd
+    rm /root/.pwroot /root/.pwuser
+    sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
+
+    # Configura mkinitcpio e GRUB
+    SYSTEM_LUKS_UUID=$(cat /root/system_luks_uuid.txt)
+    sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf kms keyboard keymap consolefont block encrypt lvm2 filesystems fsck)/' /etc/mkinitcpio.conf
+    
+    sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"quiet\"|" /etc/default/grub
+    sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=$SYSTEM_LUKS_UUID:cryptroot root=/dev/$VG_NAME/lv_root\"|" /etc/default/grub
+    sed -i 's/^#GRUB_ENABLE_CRYPTODISK=y/GRUB_ENABLE_CRYPTODISK=y/' /etc/default/grub
+    
+    mkinitcpio -P
+    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ARCH --removable
+    grub-mkconfig -o /boot/grub/grub.cfg
+
+    # Habilita serviços essenciais
+    systemctl enable NetworkManager.service
+
+    # Limpa arquivos temporários do chroot
+    rm -f /root/*_luks_uuid.txt
+CHROOT_SCRIPT
+}
+
+install_helper_scripts() {
+    info "Instalando scripts auxiliares..."
+    mkdir -p /mnt/usr/local/bin
+    
+    SYSTEM_LUKS_UUID=$(cat /mnt/root/system_luks_uuid.txt)
+    DATA_LUKS_UUID=""
+    (( ENABLE_DUAL_ENCRYPTION == 1 )) && DATA_LUKS_UUID=$(cat /mnt/root/data_luks_uuid.txt)
+
+    if (( ENABLE_DUAL_ENCRYPTION == 1 )); then
+        cat > /mnt/usr/local/bin/unlock-data <<'UNLOCK_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
+(( EUID == 0 )) || { echo "ERRO: Execute como root (sudo)." >&2; exit 1; }
+read -sp "Digite o PIN para desbloquear o disco de dados: " pin; echo
+ENC_KEYFILE="/etc/cryptsetup-keys.d/data_disk.key.enc"
+TMP_KEYFILE="/dev/shm/data_disk.key.$$"
+trap 'shred -u "$TMP_KEYFILE" &>/dev/null || rm -f "$TMP_KEYFILE"' EXIT
+printf '%s' "$pin" | openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 -pass stdin -in "$ENC_KEYFILE" -out "$TMP_KEYFILE" || { echo "ERRO: PIN incorreto ou falha ao decifrar." >&2; exit 1; }
+cryptsetup open "/dev/disk/by-uuid/DATA_UUID_PLACEHOLDER" cryptdata --key-file "$TMP_KEYFILE"
+mkdir -p /data && mount /dev/mapper/cryptdata /data
+echo "✓ Disco de dados desbloqueado e montado em /data."
+UNLOCK_SCRIPT
+        sed -i "s/DATA_UUID_PLACEHOLDER/$DATA_LUKS_UUID/" /mnt/usr/local/bin/unlock-data
+        chmod 750 /mnt/usr/local/bin/unlock-data
+    fi
 
-# --- Variáveis e Funções ---
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
-info_chroot() { printf "${BLUE}[CHROOT]${NC} %s\n" "\$*"; }
-warn_chroot() { printf "${YELLOW}[CHROOT-AVISO]${NC} %s\n" "\$*"; }
+    if (( ENABLE_AUTO_DESTRUCTION == 1 )); then
+        cat > /mnt/usr/local/bin/crypto-destroy <<'DESTROY_SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
+(( EUID == 0 )) || { echo -e "${RED}ERRO: Execute como root (sudo).${NC}" >&2; exit 1; }
+echo -e "${YELLOW}--- AVISO: MODO DE AUTO-DESTRUIÇÃO ---${NC}"
+echo "Esta ação é IRREVERSÍVEL e destruirá todos os dados criptografados."
+read -p "Para confirmar, digite 'DESTRUIR AGORA': " confirm
+[[ "$confirm" == "DESTRUIR AGORA" ]] || { echo "Operação cancelada."; exit 0; }
+read -sp "Senha de destruição: " pass; echo
+input_hash=$(printf '%s' "$pass" | sha256sum | awk '{print $1}')
+stored_hash=$(cat /etc/secure/destruction.hash)
+[[ "$input_hash" == "$stored_hash" ]] || { echo -e "${RED}ERRO: Senha de destruição incorreta.${NC}"; exit 1; }
 
-# Recebe argumentos do script principal
-HOSTNAME="\$1"
-TIMEZONE="\$2"
-LOCALE="\$3"
-KEYMAP="\$4"
-USERNAME="\$5"
-USER_SHELL="\$6"
-VG_NAME="\$7"
-BOOT_MODE="\$8"
-TARGET_DISK="\$9"
-KERNEL_PACKAGE="${KERNEL_PACKAGE}"
-ENABLE_ZRAM="${ENABLE_ZRAM}"
-SWAP_FILE_SIZE_GB="${SWAP_FILE_SIZE_GB}"
-ENABLE_USBGUARD="${ENABLE_USBGUARD}"
-
-# --- Configuração Básica ---
-info_chroot "Configurando fuso horário, locale e teclado..."
-ln -sf "/usr/share/zoneinfo/\$TIMEZONE" /etc/localtime
-hwclock --systohc
-sed -i "s/^#\$LOCALE/\$LOCALE/" /etc/locale.gen
-locale-gen
-echo "LANG=\$LOCALE" > /etc/locale.conf
-echo "KEYMAP=\$KEYMAP" > /etc/vconsole.conf
-echo "\$HOSTNAME" > /etc/hostname
-echo "127.0.0.1	localhost" >> /etc/hosts
-echo "::1		localhost" >> /etc/hosts
-echo "127.0.1.1	\$HOSTNAME.localdomain \$HOSTNAME" >> /etc/hosts
-
-# --- Usuários e Senhas ---
-info_chroot "Configurando senhas de root e usuário..."
-echo "root:\$(cat /root/.pwroot)" | chpasswd
-useradd -m -s "\$USER_SHELL" -G wheel "\$USERNAME"
-echo "\$USERNAME:\$(cat /root/.pwuser)" | chpasswd
-rm /root/.pwroot /root/.pwuser
-sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
-## MELHORIA: Log de comandos executados com sudo para auditoria.
-echo "Defaults log_input, log_output" >> /etc/sudoers
-
-# --- Bootloader (mkinitcpio e GRUB) ---
-info_chroot "Configurando mkinitcpio e GRUB..."
-## AJUSTE: 'kms' movido para antes de 'filesystems' para um boot gráfico mais rápido.
-sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect kms modconf keyboard keymap consolefont block encrypt lvm2 filesystems fsck)/' /etc/mkinitcpio.conf
-mkinitcpio -P "\$KERNEL_PACKAGE"
-
-LUKS_UUID=\$(cat /root/luks_uuid)
-ROOT_DEVICE_PATH="/dev/\$VG_NAME/lv_root"
-## MELHORIA: Parâmetros de segurança adicionados ao kernel.
-## lockdown=confidentiality: Bloqueia acesso de userland à memória do kernel.
-## ibt=off: Desativa Indirect Branch Tracking, necessário para compatibilidade com alguns bootloaders/cenários.
-## slab_nomerge: Aumenta a segurança contra heap overflows.
-GRUB_SECURITY_PARAMS="lockdown=confidentiality ibt=off slab_nomerge"
-sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"quiet \$GRUB_SECURITY_PARAMS\"|" /etc/default/grub
-sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=\$LUKS_UUID:cryptroot root=\$ROOT_DEVICE_PATH\"|" /etc/default/grub
-sed -i 's/^#GRUB_ENABLE_CRYPTODISK=.*/GRUB_ENABLE_CRYPTODISK=y/' /etc/default/grub
-## MELHORIA: Oculta o menu do GRUB para dificultar a manipulação do boot.
-echo "GRUB_TIMEOUT=0" >> /etc/default/grub
-echo "GRUB_TIMEOUT_STYLE=hidden" >> /etc/default/grub
-
-info_chroot "Instalando GRUB para modo \$BOOT_MODE..."
-if [[ "\$BOOT_MODE" == "UEFI" ]]; then
-  grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ARCH --removable
-else # Legacy
-  grub-install --target=i386-pc "\$TARGET_DISK"
-fi
-grub-mkconfig -o /boot/grub/grub.cfg
-
-# --- Hardening do Sistema ---
-info_chroot "Aplicando configurações de hardening..."
-# sysctl
-cat > /etc/sysctl.d/99-hardening.conf << EOF
-# IPV4 networking hardening
-net.ipv4.tcp_syncookies = 1
-net.ipv4.tcp_rfc1337 = 1
-net.ipv4.conf.default.rp_filter = 1
-net.ipv4.conf.all.rp_filter = 1
-net.ipv4.conf.all.accept_redirects = 0
-net.ipv4.conf.all.secure_redirects = 0
-net.ipv4.conf.all.send_redirects = 0
-# Hide kernel pointers
-kernel.kptr_restrict = 1
-# Desativar BPF JIT para usuários não privilegiados
-kernel.unprivileged_bpf_disabled = 1
-EOF
-# Kernel Modules
-cat > /etc/modprobe.d/security.conf << EOF
-# Disable uncommon filesystems
-install cramfs /bin/true
-install freevxfs /bin/true
-install jffs2 /bin/true
-install hfs /bin/true
-install hfsplus /bin/true
-install squashfs /bin/true
-install udf /bin/true
-# Disable uncommon network protocols
-install dccp /bin/true
-install sctp /bin/true
-EOF
-# Permissões
-chmod 600 /boot/grub/grub.cfg
-chmod 700 /root
-
-## MELHORIA: Configura o escalonador de I/O para SSDs.
-info_chroot "Configurando escalonador de I/O para SSDs..."
-cat > /etc/udev/rules.d/60-ioschedulers.rules << EOF
-# Set scheduler for non-rotating storage
-ACTION=="add|change", KERNEL=="sd[a-z]|nvme[0-n]1", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="mq-deadline"
-EOF
-
-## MELHORIA: Configura swap (ZRAM ou arquivo).
-if [[ "\$ENABLE_ZRAM" -eq 1 ]]; then
-    info_chroot "Configurando ZRAM..."
-    cat > /etc/systemd/zram-generator.conf << EOF
-[zram0]
-zram-size = ram / 2
-compression-algorithm = zstd
-EOF
-else
-    info_chroot "Configurando arquivo de swap..."
-    dd if=/dev/zero of=/swapfile bs=1G count=\$SWAP_FILE_SIZE_GB status=progress
-    chmod 600 /swapfile
-    mkswap /swapfile
-    echo '/swapfile none swap defaults 0 0' >> /etc/fstab
-fi
-
-# --- Firewall (UFW) ---
-info_chroot "Configurando firewall (UFW)..."
-ufw default deny incoming
-ufw default allow outgoing
-ufw enable
-
-# --- Secure Boot ---
-# ... (Seção Secure Boot permanece a mesma) ...
-
-# --- Autodestruição e Atalhos ---
-# ... (Seção Autodestruição permanece a mesma) ...
-
-# --- Verificação de Integridade de Pacotes ---
-# ... (Seção de Verificação de Integridade permanece a mesma) ...
-
-# --- Limpeza Final ---
-info_chroot "Limpando arquivos temporários do chroot..."
-rm -f /root/luks_uuid /root/data_uuid /tmp/pacman_check.log 2>/dev/null || true
-
-# --- Habilitar Serviços ---
-info_chroot "Habilitando serviços do sistema..."
-systemctl enable NetworkManager.service
-systemctl enable fstrim.timer
-systemctl enable ufw.service
-
-## MELHORIA: Habilita serviço de limpeza de memória e USBGuard.
-info_chroot "Configurando serviços de segurança adicionais..."
-cat > /etc/systemd/system/secure-wipe-memory.service << WIPE_SERVICE
-[Unit]
-Description=Wipe RAM to mitigate cold boot attacks
-DefaultDependencies=no
-Before=shutdown.target reboot.target halt.target kexec.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/memwiper -s
-StandardInput=null
-StandardOutput=null
-StandardError=null
-
-[Install]
-WantedBy=shutdown.target reboot.target halt.target kexec.target
-WIPE_SERVICE
-systemctl enable secure-wipe-memory.service
-
-if [[ "\$ENABLE_USBGUARD" -eq 1 ]]; then
-    info_chroot "Habilitando USBGuard..."
-    # Gera um conjunto de regras inicial permitindo os dispositivos atualmente conectados.
-    usbguard generate-policy > /etc/usbguard/rules.conf
-    chmod 600 /etc/usbguard/rules.conf
-    chown root:root /etc/usbguard/rules.conf
-    systemctl enable usbguard.service
-    warn_chroot "USBGuard foi habilitado. Dispositivos USB novos serão bloqueados por padrão."
-    warn_chroot "Para autorizar um novo dispositivo, use 'sudo usbguard allow-device <id>'."
-fi
-
-info_chroot "Configuração do chroot concluída."
-CHROOT_SCRIPT
-
-  chmod +x /mnt/chroot-config.sh
-  info "Executando script de configuração dentro do chroot..."
-  arch-chroot /mnt /chroot-config.sh \
-    "$HOSTNAME" "$TIMEZONE" "$LOCALE" "$KEYMAP" "$USERNAME" \
-    "$USER_SHELL" "$VG_NAME" "$BOOT_MODE" "$TARGET_DISK"
-  rm /mnt/chroot-config.sh
+destroy_luks_partition() {
+    local uuid="$1"
+    local label="$2"
+    local devpath="/dev/disk/by-uuid/$uuid"
+    if [[ -b "$devpath" ]]; then
+        echo -e "${RED}🔥 Destruindo cabeçalhos LUKS de $label ($devpath)...${NC}"
+        cryptsetup luksErase --batch-mode "$devpath"
+        echo -e "${RED}🔥 Sobrescrevendo início da partição $label com dados aleatórios...${NC}"
+        dd if=/dev/urandom of="$devpath" bs=1M count=100 status=progress
+    else
+        echo -e "${YELLOW}AVISO: Partição $label (UUID: $uuid) não encontrada. Pulando.${NC}"
+    fi
+}
+echo "Iniciando processo de destruição..."
+destroy_luks_partition "SYSTEM_UUID_PLACEHOLDER" "SISTEMA"
+[[ -n "DATA_UUID_PLACEHOLDER" ]] && destroy_luks_partition "DATA_UUID_PLACEHOLDER" "DADOS"
+echo -e "${RED}DESTRUIÇÃO CONCLUÍDA. O sistema será desligado em 5 segundos.${NC}"
+sync; sleep 5; poweroff -f
+DESTROY_SCRIPT
+        sed -i "s/SYSTEM_UUID_PLACEHOLDER/$SYSTEM_LUKS_UUID/" /mnt/usr/local/bin/crypto-destroy
+        sed -i "s/DATA_UUID_PLACEHOLDER/$DATA_LUKS_UUID/" /mnt/usr/local/bin/crypto-destroy
+        chmod 700 /mnt/usr/local/bin/crypto-destroy
+    fi
+    rm -f /mnt/root/*_luks_uuid.txt
 }
 
-# ... (As funções install_helper_scripts, sanitize_log, final_cleanup, confirm_continue e main permanecem as mesmas) ...
-# ... (Cole aqui as funções inalteradas do seu script original para manter a completude)
+final_cleanup_and_reboot() {
+    info "Finalizando e desmontando sistemas de arquivos..."
+    umount -R /mnt
+    swapoff -a
+    cryptsetup close cryptroot
+    vgchange -an "$VG_NAME"
+    sync
+    
+    echo
+    echo "=================================================="
+    echo -e "${GREEN}🎉 INSTALAÇÃO CONCLUÍDA COM SUCESSO! 🎉${NC}"
+    echo "=================================================="
+    echo "  • Hostname: $HOSTNAME"
+    echo "  • Usuário: $USERNAME"
+    echo "  • Sistema de arquivos criptografado e pronto."
+    echo
+    echo -e "${YELLOW}Ações Pós-Instalação:${NC}"
+    if (( ENABLE_DUAL_ENCRYPTION == 1 )); then
+        echo "  • Para desbloquear o disco de dados, use: ${BLUE}sudo unlock-data${NC}"
+    fi
+    if (( ENABLE_AUTO_DESTRUCTION == 1 )); then
+        echo "  • Para destruir os dados, use: ${RED}sudo crypto-destroy${NC}"
+    fi
+    echo
+    echo -e "${GREEN}Agora você pode reiniciar o sistema com o comando 'reboot'.${NC}"
+    echo
+}
 
-# --- Função main para executar o script ---
+# --- Função Principal de Execução ---
+
 main() {
-  if [[ $# -gt 0 ]] && [[ "$1" == "--help" || "$1" == "-h" ]]; then
+    # Configuração inicial e logging
+    if (( SHOW_PASSWORDS == 1 )); then
+        LOGFILE="/dev/null"
+        warn "SHOW_PASSWORDS=1. O log da instalação será descartado para não gravar senhas."
+    else
+        touch "$LOGFILE" && chmod 600 "$LOGFILE"
+    fi
+    exec > >(tee -a "$LOGFILE") 2>&1
+
+    # Início da lógica de instalação
+    require_root
+    detect_boot_mode
+    check_dependencies
+    validate_critical_vars
+    
+    echo -e "${RED}--- AVISO CRÍTICO ---${NC}"
+    echo "Este script irá apagar permanentemente os seguintes discos:"
+    echo -e "  - Disco do Sistema: ${YELLOW}$TARGET_DISK${NC}"
+    (( ENABLE_DUAL_ENCRYPTION == 1 )) && echo -e "  - Disco de Dados:   ${YELLOW}$DATA_DISK${NC}"
+    echo "Todos os dados serão perdidos. Faça backup antes de continuar."
+    read -p "Digite 'CONFIRMO' para prosseguir: " confirm
+    [[ "$confirm" == "CONFIRMO" ]] || fatal "Operação cancelada pelo usuário."
+
+    check_network
+    collect_passwords
+    prepare_for_destruction
+    partition_and_format
+    setup_luks_and_lvm
+    mount_filesystems
+    install_system
+    prepare_chroot_data
+    configure_chroot
+    install_helper_scripts
+    final_cleanup_and_reboot
+}
+
+# --- Ponto de Entrada ---
+if [[ "$#" -gt 0 && ( "$1" == "-h" || "$1" == "--help" ) ]]; then
     show_help
     exit 0
-  fi
+fi
 
-  confirm_continue
-  validate_environment
-  collect_passwords_interactive
-  setup_network_and_keys
-  sanitize_devices
-  partition_devices
-  setup_encryption_and_lvm
-  mount_filesystems_for_install
-  install_base_system
-  prepare_for_chroot
-  configure_system_chroot
-  install_helper_scripts
-  sanitize_log
-  final_cleanup
-
-  echo
-  echo "=================================================="
-  echo -e "${GREEN}🎉 INSTALAÇÃO CONCLUÍDA COM SUCESSO! 🎉${NC}"
-  echo "=================================================="
-  echo -e "  • Hostname:      ${GREEN}$HOSTNAME${NC}"
-  echo -e "  • Usuário:       ${GREEN}$USERNAME${NC}"
-  echo -e "  • Kernel:        ${GREEN}$KERNEL_PACKAGE${NC}"
-  echo -e "  • Modo de Boot:  ${GREEN}$BOOT_MODE${NC}"
-  echo ""
-  echo -e "${YELLOW}📋 NOTAS E COMANDOS PÓS-BOOT:${NC}"
-  if [[ "$ENABLE_DUAL_ENCRYPTION" -eq 1 ]]; then
-    echo -e "  • Desbloquear HD dados: ${BLUE}sudo unlock-data${NC}"
-  fi
-  if [[ "$ENABLE_AUTO_DESTRUCTION" -eq 1 ]]; then
-    echo -e "  • Auto-destruição (Terminal): ${RED}sudo crypto-destroy${NC}"
-    echo -e "  • Auto-destruição (Atalho):   ${RED}Ctrl+Alt+Shift+F12${NC}"
-  fi
-  if [[ "$ENABLE_USBGUARD" -eq 1 ]]; then
-      echo -e "  • ${YELLOW}USBGuard está ativo. Para autorizar um novo dispositivo USB, conecte-o e execute:${NC}"
-      echo -e "    ${BLUE}sudo usbguard list-devices${NC} (para ver o ID)"
-      echo -e "    ${BLUE}sudo usbguard allow-device <ID>${NC}"
-  fi
-  echo ""
-  echo -e "${GREEN}✅ Sistema pronto para reinicialização!${NC}"
-  echo -e "Execute: ${BLUE}reboot${NC}"
-  echo
-}
-
+# Garante que o script não seja executado se for "sourced"
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-  main "$@"
+    main "$@"
 fi
