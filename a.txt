@@ -1,336 +1,726 @@
-**Dissecting the User's Intent**
-
-I'm currently zeroing in on the user's needs. It's clear they want a better Arch Linux installation guide. I'm breaking down the core request and trying to understand the user's background, like whether they're seeking basic help or advanced optimizations. Defining this persona is crucial to tailoring the guide effectively.
-
-
-**Mapping the Installation Steps**
-
-I'm now mapping the core steps of the Arch Linux installation. From booting and network setup, to partitioning, base installation, and system configuration – I'm outlining each phase. Security will be woven into every section. I'm also preparing the framework to receive user input.
-
-
-**Crafting the Guide Structure**
-
-I'm now developing the overall structure for the Arch Linux guide, keeping security at the forefront. I'm considering the standard installation phases and how to weave in security best practices at each point. I'll include an introduction, and a step-by-step guide, all in Portuguese, as per request.
-
-
-**Designing Security-Focused Sections**
-
-I'm now drafting the specific instructions for each step. I'm prioritizing security, with LUKS encryption at the partitioning step. I am also outlining clear commands and explanations, using a structured layout for the user to easily follow. I'll focus on robust, secure, and accurate commands.
-
-
-**Expanding on Partitioning**
-
-I'm digging deeper into the partitioning phase. I'm now fleshing out the "why" behind my recommendations. I will explain to the user why I'm suggesting this partition layout and why it enhances both security and system stability. I am also thinking about providing extra recommendations regarding partition sizes, based on common uses.
-
-
-**Outlining a Comprehensive Guide**
-
-I'm now finalizing the framework for the guide, step-by-step. I'm including the basic installation steps and then incorporating a security-focused mindset. I will be using a clear structure and language. I'm also starting to flesh out individual section details, especially the critical security aspects of each step.
-
-
-**Elaborating Security-Focused Steps**
-
-I'm now focused on weaving security throughout the guide. The partitioning step will get a dedicated explanation for the user. I'm also fleshing out the LUKS encryption process with a robust command, plus the importance of a strong passphrase. The aim is to educate, not just provide a list of commands.
-
-
-**Weaving in Security Measures**
-
-I'm now actively integrating security features into each installation step. For partitioning, I'm detailing the use of LUKS for encryption, emphasizing strong passphrases. I'm explaining the rationale behind each decision to educate the user. Furthermore, I am adding an explanation of partition schemes, and their impact.
-
-
-**Developing a Detailed Structure**
-
-I'm now moving on to crafting the framework for the installation guide, ensuring a secure setup. I'll leverage the standard installation steps as a foundation, but with a security-first mindset at every stage. This will include a clear step-by-step procedure for the user to follow, with Portuguese language support.
-
-
-**Formulating a Detailed Outline**
-
-I'm now meticulously crafting the overall structure of the installation guide. This involves mapping out the core steps and figuring out how to integrate security measures. I will be using the conventional installation steps. My goal is to create a guide that is well-structured, comprehensive, and secure.
-
-
-Com certeza! Como um especialista em Arch Linux, terei o prazer de transformar um guia básico em um manual de instalação robusto, moderno e, acima de tudo, **seguro**.
-
-Por favor, cole o seu guia para que eu possa melhorá-lo.
-
-No entanto, como você ainda não forneceu um, vou criar um guia do zero que incorpora as melhores práticas de segurança e robustez que um especialista recomendaria. Este guia será muito superior a um tutorial básico, focando em:
-
-1.  **Criptografia de Disco Completa (LUKS):** Para proteger seus dados em caso de roubo ou perda do dispositivo.
-2.  **LVM sobre LUKS:** Para gerenciamento de partições flexível e escalável.
-3.  **Partições Separadas:** Isolar o sistema (`/`), os dados do usuário (`/home`) e o boot (`/boot`).
-4.  **Kernel Hardened (Opcional, mas recomendado):** Um kernel com patches de segurança adicionais.
-5.  **Microcode:** Atualizações essenciais para a CPU que corrigem vulnerabilidades de hardware (como Spectre/Meltdown).
-6.  **Uso correto de UUIDs:** Para um sistema de arquivos mais resiliente a mudanças.
-7.  **Firewall Básico:** Uma camada essencial de segurança de rede.
-
----
-
-### **Guia Melhorado e Seguro para Instalação do Arch Linux**
-
-Este guia assume que você está instalando em um sistema moderno com UEFI.
-
-#### **Passo 0: Preparação no Ambiente Live**
-
-1.  **Definir o Layout do Teclado:**
-    ```bash
-    loadkeys br-abnt2
-    ```
-
-2.  **Verificar o Modo de Boot (UEFI):**
-    Este comando não deve retornar erro. Se retornar, você provavelmente bootou em modo Legacy/BIOS.
-    ```bash
-    ls /sys/firmware/efi/efivars
-    ```
-
-3.  **Conectar à Internet:**
-    *   **Wi-Fi:** Use a ferramenta interativa `iwctl`.
-    *   **Cabo:** Geralmente conecta automaticamente.
-    *   **Verificar conexão:**
-        ```bash
-        ping archlinux.org
-        ```
-
-4.  **Atualizar o Relógio do Sistema:**
-    Essencial para a verificação de assinaturas de pacotes (uma medida de segurança).
-    ```bash
-    timedatectl set-ntp true
-    ```
-
-#### **Passo 1: Particionamento do Disco**
-
-Vamos criar um esquema de partições seguro e flexível. Identifique seu disco com `lsblk`. Vamos assumir que é `/dev/sda`.
-
-Use `cfdisk /dev/sda` para criar a seguinte estrutura:
-
-*   `/dev/sda1`: **EFI System Partition (ESP)**
-    *   **Tamanho:** 512M
-    *   **Tipo:** `EFI System`
-*   `/dev/sda2`: **/boot**
-    *   **Tamanho:** 1G
-    *   **Tipo:** `Linux filesystem`
-    *   💡 **Por quê?** Manter o `/boot` fora da criptografia simplifica a configuração do bootloader (GRUB) e a recuperação do sistema.
-*   `/dev/sda3`: **Container LUKS**
-    *   **Tamanho:** Restante do disco
-    *   **Tipo:** `Linux filesystem`
-
-#### **Passo 2: 🛡️ Criptografia (LUKS)**
-
-Aqui criamos o container criptografado que guardará nosso sistema e arquivos.
-
-1.  **Formatar a partição com LUKS2 (moderno e seguro):**
-    ```bash
-    # Escolha uma senha MUITO forte. Esta é a chave do seu reino.
-    cryptsetup luksFormat --type luks2 -c aes-xts-plain64 -s 512 -h sha512 /dev/sda3
-    ```
-
-2.  **Abrir o container LUKS:**
-    Isso o tornará acessível como um dispositivo mapeado em `/dev/mapper/cryptlvm`.
-    ```bash
-    cryptsetup open /dev/sda3 cryptlvm
-    ```
-
-#### **Passo 3: Gerenciamento de Volumes Lógicos (LVM sobre LUKS)**
-
-LVM nos dá flexibilidade para criar, redimensionar e gerenciar "partições" (Volumes Lógicos) dentro do nosso container criptografado.
-
-1.  **Criar um Physical Volume (PV):**
-    ```bash
-    pvcreate /dev/mapper/cryptlvm
-    ```
-
-2.  **Criar um Volume Group (VG):**
-    ```bash
-    vgcreate vg0 /dev/mapper/cryptlvm
-    ```
-
-3.  **Criar os Logical Volumes (LV):**
-    *   **Swap:** (Ajuste o tamanho conforme sua RAM)
-        ```bash
-        lvcreate -L 8G vg0 -n swap
-        ```
-    *   **Root (`/`):** (Onde o sistema será instalado)
-        ```bash
-        lvcreate -L 50G vg0 -n root
-        ```
-    *   **Home (`/home`):** (Seus arquivos pessoais, usando todo o espaço restante)
-        ```bash
-        lvcreate -l 100%FREE vg0 -n home
-        ```
-    *   💡 **Por quê?** Separar `/home` permite que você reinstale o sistema operacional (a partição `root`) sem perder seus dados pessoais.
-
-#### **Passo 4: Formatação e Montagem**
-
-Agora formatamos e montamos nossas novas partições.
-
-1.  **Formatar:**
-    ```bash
-    # Partição EFI
-    mkfs.fat -F32 /dev/sda1
-
-    # Partição /boot
-    mkfs.ext4 /dev/sda2
-
-    # Volumes Lógicos
-    mkfs.ext4 /dev/mapper/vg0-root
-    mkfs.ext4 /dev/mapper/vg0-home
-    mkswap /dev/mapper/vg0-swap
-    ```
-
-2.  **Montar:**
-    A ordem é importante!
-    ```bash
-    # Montar a raiz
-    mount /dev/mapper/vg0-root /mnt
-
-    # Criar pontos de montagem e montar
-    mkdir /mnt/boot
-    mkdir /mnt/home
-    mount /dev/sda2 /mnt/boot
-    mount /dev/mapper/vg0-home /mnt/home
-
-    # Ativar o swap
-    swapon /dev/mapper/vg0-swap
-    ```
-
-#### **Passo 5: Instalação do Sistema Base**
-
-Usamos `pacstrap` para instalar os pacotes essenciais no nosso novo sistema.
+# Guia Completo de Instalação Segura do Arch Linux com Dois Discos
+
+## Pré-requisitos
+- Computador com UEFI
+- SSD (sda) para sistema
+- HD (sdd) para auxiliar/backup
+- Pendrive bootável com Arch Linux
+
+## Passo 1: Preparação do Ambiente Live
+
+### 1.1 Boot e Conexão
+```bash
+# Inicialize pelo USB do Arch Linux
+# Verifique o modo UEFI
+ls /sys/firmware/efi/efivars
+
+# Conecte-se à internet (Wi-Fi)
+iwctl
+device list
+station wlan0 scan
+station wlan0 get-networks
+station wlan0 connect SUA_REDE
+exit
+
+# Ou para cabo
+dhcpcd
+
+# Atualize o relógio
+timedatectl set-ntp true
+
+# Instale ferramentas
+pacman -Syy
+pacman -S git reflector sudo gptfdisk btrfs-progs
+```
+
+### 1.2 Otimização para PC Fraco
+```bash
+# Atualize mirrors para melhor velocidade
+reflector --country Brazil --sort rate --save /etc/pacman.d/mirrorlist
+```
+
+## Passo 2: Particionamento e Criptografia
+
+### 2.1 Identificação dos Discos
+```bash
+lsblk
+# sda = SSD (sistema)
+# sdd = HD (auxiliar)
+```
+
+### 2.2 Particionamento
+```bash
+# Limpeza prévia (se necessário)
+wipefs -a /dev/sda
+wipefs -a /dev/sdd
+
+# Particionar sda (SSD)
+parted /dev/sda mklabel gpt
+parted /dev/sda mkpart primary fat32 1MiB 513MiB
+parted /dev/sda set 1 esp on
+parted /dev/sda mkpart primary 513MiB 100%
+
+# Particionar sdd (HD)
+parted /dev/sdd mklabel gpt
+parted /dev/sdd mkpart primary 1MiB 100%
+```
+
+### 2.3 Criptografia LUKS2
+```bash
+# Criptografar sda2
+cryptsetup luksFormat --type luks2 -i 5000 --hash sha512 /dev/sda2
+# Digite a senha mestra
+
+# Criptografar sdd1
+cryptsetup luksFormat --type luks2 -i 5000 --hash sha512 /dev/sdd1
+# Digite a MESMA senha mestra
+
+# Abrir containers
+cryptsetup open /dev/sda2 cryptroot
+cryptsetup open /dev/sdd1 cryptaux
+```
+
+### 2.4 Formatação e Montagem
+```bash
+# Formatar partições
+mkfs.fat -F32 /dev/sda1
+mkfs.btrfs -L archlinux /dev/mapper/cryptroot
+mkfs.btrfs -L archaux /dev/mapper/cryptaux
+
+# Montar sistema
+mount /dev/mapper/cryptroot /mnt
+
+# Criar subvolumes Btrfs
+btrfs subvolume create /mnt/@
+btrfs subvolume create /mnt/@home
+btrfs subvolume create /mnt/@var
+btrfs subvolume create /mnt/@tmp
+btrfs subvolume create /mnt/@snapshots
+
+# Remontar com subvolumes
+umount /mnt
+mount -o subvol=@,compress=zstd,noatime,nodiratime /dev/mapper/cryptroot /mnt
+
+# Criar diretórios
+mkdir -p /mnt/{boot,home,var,tmp,.snapshots}
+
+# Montar subvolumes
+mount -o subvol=@home,compress=zstd,noatime,nodiratime /dev/mapper/cryptroot /mnt/home
+mount -o subvol=@var,compress=zstd,noatime,nodiratime /dev/mapper/cryptroot /mnt/var
+mount -o subvol=@tmp,compress=zstd,noatime,nodiratime /dev/mapper/cryptroot /mnt/tmp
+mount -o subvol=@snapshots,compress=zstd,noatime,nodiratime /dev/mapper/cryptroot /mnt/.snapshots
+
+# Montar EFI
+mount /dev/sda1 /mnt/boot
+
+# Montar disco auxiliar
+mkdir /mnt/aux
+mount /dev/mapper/cryptaux /mnt/aux
+```
+
+## Passo 3: Instalação do Sistema
+
+### 3.1 Instalar Pacotes
+```bash
+pacstrap /mnt base base-devel linux linux-firmware \
+btrfs-progs snapper reflector sudo git neovim \
+networkmanager iwd openssh ufw fail2ban
+```
+
+### 3.2 Configurar Fstab
+```bash
+genfstab -U /mnt >> /mnt/etc/fstab
+```
+
+### 3.3 Entrar no Sistema
+```bash
+arch-chroot /mnt
+```
+
+## Passo 4: Configuração Básica
+
+### 4.1 Fuso Horário e Localização
+```bash
+ln -sf /usr/share/zoneinfo/America/Sao_Paulo /etc/localtime
+hwclock --systohc
+
+echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
+echo "pt_BR.UTF-8 UTF-8" >> /etc/locale.gen
+locale-gen
+echo "LANG=pt_BR.UTF-8" > /etc/locale.conf
+
+echo "KEYMAP=br-abnt2" > /etc/vconsole.conf
+```
+
+### 4.2 Hostname e Hosts
+```bash
+echo "arch-secure" > /etc/hostname
+
+echo "127.0.0.1 localhost" >> /etc/hosts
+echo "::1 localhost" >> /etc/hosts
+echo "127.0.1.1 arch-secure.localdomain arch-secure" >> /etc/hosts
+```
+
+### 4.3 Usuários e Senhas
+```bash
+passwd
+useradd -m -G wheel -s /bin/bash usuario
+passwd usuario
+echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
+```
+
+## Passo 5: Configuração de Segurança
+
+### 5.1 Initramfs
+```bash
+nano /etc/mkinitcpio.conf
+```
+Adicione na linha HOOKS:
+```
+HOOKS=(base systemd autodetect keyboard sd-vconsole modconf block sd-encrypt filesystems fsck)
+```
+```bash
+mkinitcpio -P
+```
+
+### 5.2 GRUB e Criptografia
+```bash
+pacman -S grub efibootmgr
+
+# Obter UUIDs
+SDA2_UUID=$(blkid -s UUID -o value /dev/sda2)
+SDD1_UUID=$(blkid -s UUID -o value /dev/sdd1)
+
+# Configurar GRUB
+echo "GRUB_ENABLE_CRYPTODISK=y" >> /etc/default/grub
+echo "GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=$SDA2_UUID:cryptroot root=/dev/mapper/cryptroot cryptdevice=UUID=$SDD1_UUID:cryptaux\"" >> /etc/default/grub
+
+# Instalar GRUB
+grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
+grub-mkconfig -o /boot/grub/grub.cfg
+```
+
+### 5.3 Secure Boot (Opcional)
+```bash
+pacman -S sbctl
+sbctl create-keys
+sbctl enroll-keys -m
+sbctl sign -s /boot/efi/EFI/GRUB/grubx64.efi
+sbctl sign -s /boot/vmlinuz-linux
+```
+
+## Passo 6: Serviços de Rede
+```bash
+systemctl enable NetworkManager
+systemctl enable iwd
+systemctl enable sshd
+```
+
+## Passo 7: Firewall e Proteção
+```bash
+ufw default deny
+ufw allow ssh
+ufw enable
+
+systemctl enable fail2ban
+```
+
+## Passo 8: Mecanismos de Autodestruição
+
+### 8.1 Script de Monitoramento
+```bash
+nano /usr/local/bin/secure-boot-monitor
+```
+Conteúdo:
+```bash
+#!/bin/bash
+ATTEMPT_FILE="/var/log/luks-attempts.log"
+MAX_ATTEMPTS=10
+
+if [ -f "$ATTEMPT_FILE" ]; then
+    ATTEMPTS=$(cat "$ATTEMPT_FILE")
+else
+    ATTEMPTS=0
+fi
+
+if [ "$ATTEMPTS" -ge "$MAX_ATTEMPTS" ]; then
+    echo "MÁXIMO DE TENTATIVAS EXCEDIDO - INICIANDO AUTODESTRUIÇÃO"
+    /usr/local/bin/self-destruct
+    exit 1
+fi
+
+read -s -p "Senha de descriptografia: " password
+echo
+
+if ! echo "$password" | cryptsetup open --test-passphrase /dev/sda2; then
+    echo $((ATTEMPTS + 1)) > "$ATTEMPT_FILE"
+    echo "Senha incorreta. Tentativas: $((ATTEMPTS + 1))/$MAX_ATTEMPTS"
+    exit 1
+else
+    echo "0" > "$ATTEMPT_FILE"
+    echo "$password" | cryptsetup open /dev/sda2 cryptroot -
+    echo "$password" | cryptsetup open /dev/sdd1 cryptaux -
+    exit 0
+fi
+```
+```bash
+chmod +x /usr/local/bin/secure-boot-monitor
+```
+
+### 8.2 Script de Autodestruição
+```bash
+nano /usr/local/bin/self-destruct
+```
+Conteúdo:
+```bash
+#!/bin/bash
+echo "ATIVAÇÃO DO PROTOCOLO DE AUTODESTRUIÇÃO"
+echo "Este processo é IRREVERSÍVEL"
+
+read -p "Digite 'CONFIRMAR' para continuar: " confirmation
+
+if [ "$confirmation" != "CONFIRMAR" ]; then
+    echo "Cancelado."
+    exit 1
+fi
+
+echo "Sobrescrevendo headers LUKS..."
+dd if=/dev/urandom of=/dev/sda2 bs=512 count=20480
+dd if=/dev/urandom of=/dev/sdd1 bs=512 count=20480
+
+echo "Reiniciando sistema em 10 segundos..."
+sleep 10
+reboot
+```
+```bash
+chmod +x /usr/local/bin/self-destruct
+```
+
+### 8.3 Sistema de Backup
+```bash
+nano /usr/local/bin/backup-manager
+```
+Conteúdo:
+```bash
+#!/bin/bash
+BACKUP_DIR="/aux/backup"
+LOG_FILE="/var/log/backup.log"
+CURRENT_DATE=$(date +%Y%m%d-%H%M%S)
+
+echo "$(date) - Iniciando backup" >> "$LOG_FILE"
+mkdir -p "$BACKUP_DIR"
+
+cryptsetup luksHeaderBackup /dev/sda2 --header-backup-file "$BACKUP_DIR/luks-header-sda2-$CURRENT_DATE.img"
+cryptsetup luksHeaderBackup /dev/sdd1 --header-backup-file "$BACKUP_DIR/luks-header-sdd1-$CURRENT_DATE.img"
+
+btrfs subvolume snapshot / /.snapshots/backup-$CURRENT_DATE
+
+echo "$(date) - Backup concluído" >> "$LOG_FILE"
+echo "💾 LEMBRETE: Backups em $BACKUP_DIR"
+```
+```bash
+chmod +x /usr/local/bin/backup-manager
+
+# Agendar backups
+crontab -e
+```
+Adicione:
+```
+0 2 * * 0 /usr/local/bin/backup-manager
+```
+
+## Passo 9: Finalização
+```bash
+exit
+umount -R /mnt
+reboot
+```
+
+## Notas Importantes
+- Guarde os headers LUKS em local seguro
+- Teste o sistema após instalação
+- Configure o Snapper para snapshots automáticos
+- Mantenha o sistema atualizado
+
+Este guia oferece uma instalação segura com proteção contra ataques físicos e sistema de autodestruição após 10 tentativas falhas.
+
+# Guia Ultra-Seguro de Instalação do Arch Linux para Hardware Limitado (4GB RAM)
+
+## 🔍 Entendendo o "aviso do fstab" no parted
+
+**É normal** que ao modificar partições com `parted` você receba a mensagem "you may need to update /etc/fstab". Isso ocorre porque:
+
+1. O `parted` apenas modifica a tabela de partições
+2. O sistema não atualiza automaticamente o `/etc/fstab`
+3. Você precisará regenerar o fstab **após** montar todas as partições
+
+**Solução definitiva:** Execute `genfstab -U /mnt >> /mnt/etc/fstab` apenas **depois** de montar todas as partições no local correto.
+
+## 🛡️ Configuração de Segurança Reforçada para PC com 4GB RAM
+
+### Pré-Instalação: Preparação do Ambiente Live
 
 ```bash
-# -K inicializa o chaveiro do pacman no novo sistema
-# Adicionamos pacotes essenciais para nossa configuração
-pacstrap -K /mnt base linux-hardened linux-firmware lvm2 grub efibootmgr networkmanager neovim nano intel-ucode
+# Otimização para pouca memória
+echo "vm.swappiness=10" >> /etc/sysctl.d/99-sysctl.conf
+echo "vm.vfs_cache_pressure=50" >> /etc/sysctl.d/99-sysctl.conf
+
+# Configurar zswap para melhor uso de RAM
+echo "add_drivers+=\"zram\"" >> /etc/mkinitcpio.conf
+
+# Instalar ferramentas essenciais
+pacman -Syy
+pacman -S gptfdisk btrfs-progs reflector sudo git
+reflector --country Brazil --protocol https --sort rate --save /etc/pacman.d/mirrorlist
 ```
-*   **`base`**: O mínimo necessário.
-*   **`linux-hardened`**: 🛡️ Kernel com foco em segurança. Use `linux` se preferir o padrão.
-*   **`linux-firmware`**: Firmware para a maioria dos hardwares.
-*   **`lvm2`**: Essencial para gerenciar nossos volumes LVM.
-*   **`grub` `efibootmgr`**: Nosso bootloader para UEFI.
-*   **`networkmanager`**: Gerenciador de rede fácil de usar após a instalação.
-*   **`neovim` `nano`**: Editores de texto para configurar o sistema.
-*   **`intel-ucode`** ou **`amd-ucode`**: 🛡️ Atualizações de microcódigo para a CPU. Escolha o do seu fabricante. **Isto é uma etapa de segurança crucial.**
 
-#### **Passo 6: Configuração do Sistema (dentro do chroot)**
+### Particionamento e Criptografia Avançada
 
-1.  **Gerar o fstab:**
-    O fstab define como as partições são montadas no boot. Use `-U` para usar UUIDs, que são mais robustos.
-    ```bash
-    genfstab -U /mnt >> /mnt/etc/fstab
-    # Verifique o arquivo gerado para garantir que está correto
-    cat /mnt/etc/fstab
-    ```
+```bash
+# Identificar discos
+lsblk
 
-2.  **Entrar no novo sistema (chroot):**
-    ```bash
-    arch-chroot /mnt
-    ```
+# LIMPEZA SEGURA DOS DISCOS (com zeros)
+# Isso também resolve problemas de tabela de partições residual
+dd if=/dev/zero of=/dev/sda bs=1M status=progress count=100
+dd if=/dev/zero of=/dev/sdd bs=1M status=progress count=100
 
-3.  **Fuso Horário:**
-    ```bash
-    ln -sf /usr/share/zoneinfo/America/Sao_Paulo /etc/localtime
-    hwclock --systohc
-    ```
+# Particionamento GPT
+parted /dev/sda mklabel gpt
+parted /dev/sda mkpart primary fat32 1MiB 513MiB
+parted /dev/sda set 1 esp on
+parted /dev/sda mkpart primary 513MiB 100%
 
-4.  **Localização (Idioma):**
-    *   Edite `/etc/locale.gen` e descomente `pt_BR.UTF-8 UTF-8` e `en_US.UTF-8 UTF-8`.
-    *   Execute `locale-gen`.
-    *   Crie o arquivo `/etc/locale.conf` com o conteúdo: `LANG=pt_BR.UTF-8`.
+parted /dev/sdd mklabel gpt
+parted /dev/sdd mkpart primary 1MiB 100%
 
-5.  **Nome do Host (Hostname):**
-    *   Crie o arquivo `/etc/hostname` com o nome do seu computador (ex: `meu-arch`).
+# Criptografia LUKS2 com parâmetros otimizados
+cryptsetup luksFormat --type luks2 --pbkdf argon2id --iter-time 5000 --hash sha512 /dev/sda2
+cryptsetup luksFormat --type luks2 --pbkdf argon2id --iter-time 5000 --hash sha512 /dev/sdd1
 
-6.  **Arquivo Hosts:**
-    Edite `/etc/hosts` e adicione:
-    ```
-    127.0.0.1   localhost
-    ::1         localhost
-    127.0.1.1   meu-arch.localdomain  meu-arch
-    ```
+# Adicionar chave comum aos dois discos
+mkdir -p /root/luks-keys
+dd if=/dev/random of=/root/luks-keys/common-key.bin bs=512 count=4
+cryptsetup luksAddKey /dev/sda2 /root/luks-keys/common-key.bin
+cryptsetup luksAddKey /dev/sdd1 /root/luks-keys/common-key.bin
 
-7.  **Senha de Root:**
-    Defina uma senha forte para o superusuário.
-    ```bash
-    passwd
-    ```
+# Abrir dispositivos
+cryptsetup open --key-file /root/luks-keys/common-key.bin /dev/sda2 cryptroot
+cryptsetup open --key-file /root/luks-keys/common-key.bin /dev/sdd1 cryptaux
+```
 
-#### **Passo 7: Configuração do Initramfs e Bootloader (Etapa Crítica!)**
+### Sistema de Arquivos e Montagem com ZRAM
 
-Precisamos dizer ao sistema como desbloquear nosso disco na inicialização.
+```bash
+# Formatação
+mkfs.fat -F32 /dev/sda1
+mkfs.btrfs -L archroot /dev/mapper/cryptroot
+mkfs.btrfs -L archaux /dev/mapper/cryptaux
 
-1.  **Configurar o mkinitcpio:**
-    Edite `/etc/mkinitcpio.conf`. Encontre a linha `HOOKS=(...)` e modifique-a para que `encrypt` e `lvm2` venham antes de `filesystems`.
-    ```
-    # Ordem correta:
-    HOOKS=(base udev autodetect keyboard keymap consolefont modconf block encrypt lvm2 filesystems fsck)
-    ```
+# Configurar ZRAM para swap (otimizado para 4GB RAM)
+modprobe zram
+echo lz4 > /sys/block/zram0/comp_algorithm
+echo 1G > /sys/block/zram0/disksize
+mkswap /dev/zram0
+swapon /dev/zram0
 
-2.  **Recriar o Initramfs:**
-    ```bash
-    mkinitcpio -P
-    ```
+# Montagem do sistema principal
+mount /dev/mapper/cryptroot /mnt
 
-3.  **Configurar o GRUB:**
-    *   Edite `/etc/default/grub`.
-    *   Encontre a linha `GRUB_CMDLINE_LINUX=""`.
-    *   Precisamos do UUID da nossa partição criptografada (`/dev/sda3`). Fora do chroot, você usaria `blkid /dev/sda3`. Dentro, podemos encontrá-lo com `ls -l /dev/disk/by-uuid`.
-    *   Adicione o seguinte à linha, substituindo `SEU_UUID_AQUI` pelo UUID correto:
-        ```
-        GRUB_CMDLINE_LINUX="cryptdevice=UUID=SEU_UUID_AQUI:cryptlvm root=/dev/mapper/vg0-root"
-        ```
+# Subvolumes Btrfs (otimizados)
+btrfs subvolume create /mnt/@
+btrfs subvolume create /mnt/@home
+btrfs subvolume create /mnt/@var
+btrfs subvolume create /mnt/@tmp
+btrfs subvolume create /mnt/@snapshots
+btrfs subvolume create /mnt/@swap
 
-4.  **Instalar e Gerar a Configuração do GRUB:**
-    ```bash
-    grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=ARCH
-    grub-mkconfig -o /boot/grub/grub.cfg
-    ```
+umount /mnt
 
-#### **Passo 8: Usuário e Finalização**
+# Montagem com opções otimizadas para SSD e pouca RAM
+mount -o subvol=@,compress=zstd:1,noatime,nodiratime,ssd,space_cache=v2 /dev/mapper/cryptroot /mnt
 
-🛡️ **Nunca use a conta root para tarefas diárias!**
+mkdir -p /mnt/{boot,home,var,tmp,.snapshots,swap}
+mount -o subvol=@home,compress=zstd:1,noatime,nodiratime /dev/mapper/cryptroot /mnt/home
+mount -o subvol=@var,compress=zstd:1,noatime,nodiratime /dev/mapper/cryptroot /mnt/var
+mount -o subvol=@tmp,compress=zstd:1,noatime,nodiratime /dev/mapper/cryptroot /mnt/tmp
+mount -o subvol=@snapshots,compress=zstd:1,noatime,nodiratime /dev/mapper/cryptroot /mnt/.snapshots
+mount -o subvol=@swap,compress=zstd:1,noatime,nodiratime /dev/mapper/cryptroot /mnt/swap
 
-1.  **Criar um usuário padrão:**
-    ```bash
-    # O grupo 'wheel' permite obter privilégios de administrador com sudo
-    useradd -m -G wheel -s /bin/bash seu_usuario
-    passwd seu_usuario
-    ```
+mount /dev/sda1 /mnt/boot
+mkdir /mnt/aux
+mount /dev/mapper/cryptaux /mnt/aux
+```
 
-2.  **Configurar o `sudo`:**
-    *   Instale o sudo: `pacman -S sudo`.
-    *   Execute `visudo` e descomente a linha: `%wheel ALL=(ALL:ALL) ALL`.
+### Instalação do Sistema com Pacotes Otimizados
 
-3.  **Habilitar o Gerenciador de Rede:**
-    ```bash
-    systemctl enable NetworkManager
-    ```
+```bash
+# Pacotes essenciais (leves e seguros)
+pacstrap /mnt base base-devel linux linux-firmware linux-headers \
+btrfs-progs snapper reflector sudo git neovim \
+networkmanager iwd openssh ufw fail2ban \
+zram-generator micro doas
 
-4.  **Sair e Reiniciar:**
-    ```bash
-    exit
-    umount -R /mnt
-    reboot
-    ```
+# GERAR FSTAP APÓS TODAS AS MONTAGENS
+genfstab -U /mnt >> /mnt/etc/fstab
 
-Ao reiniciar, o GRUB irá carregar e então pedirá a sua senha para desbloquear o disco. Após inseri-la, o sistema continuará o boot normalmente.
+# Adicionar entrada para swap no zram
+echo "/dev/zram0 none swap defaults 0 0" >> /mnt/etc/fstab
 
-#### **Pós-Instalação: Próximos Passos de Segurança**
+arch-chroot /mnt
+```
 
-1.  **Ativar um Firewall:**
-    `ufw` é simples e eficaz.
-    ```bash
-    sudo pacman -S ufw
-    sudo ufw enable
-    sudo ufw default deny incoming
-    sudo ufw default allow outgoing
-    sudo systemctl enable ufw.service
-    ```
+### Configuração do Sistema com Segurança Reforçada
 
-2.  **Manter o Sistema Atualizado:**
-    A prática de segurança mais importante.
-    ```bash
-    sudo pacman -Syu
-    ```
+```bash
+# Configurações básicas
+ln -sf /usr/share/zoneinfo/America/Sao_Paulo /etc/localtime
+hwclock --systohc
 
-3.  **Explore o Arch Wiki:**
-    Para instalar um ambiente gráfico (KDE, GNOME), drivers de vídeo e qualquer outro software, o [Arch Wiki](https://wiki.archlinux.org/) é seu melhor amigo.
+echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
+echo "pt_BR.UTF-8 UTF-8" >> /etc/locale.gen
+locale-gen
+echo "LANG=pt_BR.UTF-8" > /etc/locale.conf
+echo "KEYMAP=br-abnt2" > /etc/vconsole.conf
 
-Este guia cria uma base extremamente sólida e segura para o seu sistema Arch Linux. Parabéns pela escolha de fazer da maneira correta
+echo "arch-secure" > /etc/hostname
+
+# Configuração de hosts mais segura
+cat > /etc/hosts << EOF
+127.0.0.1 localhost
+::1 localhost
+127.0.1.1 arch-secure.localdomain arch-secure
+EOF
+
+# Usuários e segurança
+passwd
+useradd -m -G wheel -s /bin/bash usuario
+passwd usuario
+
+# Configurar doas como alternativa mais segura ao sudo
+echo "permit persist :wheel" > /etc/doas.conf
+chmod 0400 /etc/doas.conf
+
+# Configuração do zram no sistema instalado
+cat > /etc/systemd/zram-generator.conf << EOF
+[zram0]
+zram-size = 1024
+compression-algorithm = lz4
+swap-priority = 100
+EOF
+```
+
+### Kernel e Initramfs Otimizados
+
+```bash
+# Configuração do mkinitcpio para segurança e desempenho
+cat > /etc/mkinitcpio.conf << EOF
+MODULES=(btrfs zram)
+BINARIES=()
+FILES=()
+HOOKS=(base systemd autodetect keyboard sd-vconsole modconf block sd-encrypt filesystems fsck)
+COMPRESSION="zstd"
+COMPRESSION_OPTIONS=(-1)
+EOF
+
+mkinitcpio -P
+
+# Parâmetros de kernel para segurança e desempenho
+cat > /etc/sysctl.d/99-security.conf << EOF
+kernel.kptr_restrict=2
+kernel.dmesg_restrict=1
+kernel.printk=3 3 3 3
+kernel.unprivileged_bpf_disabled=1
+net.core.bpf_jit_harden=2
+dev.tty.ldisc_autoload=0
+vm.swappiness=10
+vm.vfs_cache_pressure=50
+EOF
+```
+
+### Bootloader Seguro com Configuração Avançada
+
+```bash
+# Instalar e configurar GRUB
+pacman -S grub efibootmgr
+
+# Obter UUIDs
+SDA2_UUID=$(blkid -s UUID -o value /dev/sda2)
+SDD1_UUID=$(blkid -s UUID -o value /dev/sdd1)
+
+# Configuração segura do GRUB
+cat > /etc/default/grub << EOF
+GRUB_DEFAULT=0
+GRUB_TIMEOUT=5
+GRUB_DISTRIBUTOR="Arch"
+GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3 quiet mitigations=auto,nosmt security=apparmor"
+GRUB_CMDLINE_LINUX="cryptdevice=UUID=$SDA2_UUID:cryptroot root=/dev/mapper/cryptroot cryptdevice=UUID=$SDD1_UUID:cryptaux"
+GRUB_PRELOAD_MODULES="part_gpt part_msdos"
+GRUB_ENABLE_CRYPTODISK=y
+GRUB_TIMEOUT_STYLE=countdown
+GRUB_TERMINAL_INPUT=console
+GRUB_TERMINAL_OUTPUT=console
+GRUB_DISABLE_RECOVERY=true
+EOF
+
+grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=ArchLinux-Secure
+grub-mkconfig -o /boot/grub/grub.cfg
+```
+
+### Sistema de Autodestruição e Monitoramento
+
+```bash
+# Script de autodestruição com verificação de backup
+cat > /usr/local/bin/secure-destruct << 'EOF'
+#!/bin/bash
+
+# Verificar se há backups recentes
+BACKUP_AGE=$(find /aux/backup -name "luks-header-*" -mtime -2 2>/dev/null | wc -l)
+
+if [ "$BACKUP_AGE" -eq 0 ]; then
+    echo "⚠️  ALERTA CRÍTICO: Não há backups recentes!"
+    echo "Último backup deve ser preservado antes da autodestruição."
+    exit 1
+fi
+
+echo "🚨 INICIANDO PROTOCOLO DE DESTRUIÇÃO SEGURA"
+echo "Este processo é IRREVERSÍVEL e DESTRUTIVO"
+
+for i in {10..1}; do
+    echo -ne "Confirmação necessária em $i segundos...\\r"
+    sleep 1
+done
+
+read -p "Digite 'CONFIRMAR-DESTRUIÇÃO' para continuar: " confirmation
+
+if [ "$confirmation" != "CONFIRMAR-DESTRUIÇÃO" ]; then
+    echo "❌ Autodestruição cancelada."
+    exit 1
+fi
+
+# Destruição segura dos headers LUKS
+echo "🔓 Desbloqueando discos..."
+cryptsetup open --key-file /root/luks-keys/common-key.bin /dev/sda2 cryptroot_temp
+cryptsetup open --key-file /root/luks-keys/common-key.bin /dev/sdd1 cryptaux_temp
+
+echo "💥 Sobrescrevendo headers LUKS..."
+# Sobrescrever apenas os headers (área crítica)
+dd if=/dev/urandom of=/dev/sda2 bs=512 count=20480
+dd if=/dev/urandom of=/dev/sdd1 bs=512 count=20480
+
+echo "🔄 Reiniciando sistema..."
+sleep 3
+reboot
+EOF
+
+chmod 700 /usr/local/bin/secure-destruct
+
+# Sistema de monitoramento de tentativas
+cat > /usr/local/bin/login-monitor << 'EOF'
+#!/bin/bash
+
+ATTEMPT_FILE="/var/log/login_attempts.log"
+MAX_ATTEMPTS=5
+LOCK_TIME=300
+
+current_attempts() {
+    [ -f "$ATTEMPT_FILE" ] && cat "$ATTEMPT_FILE" || echo 0
+}
+
+increment_attempt() {
+    local current=$(current_attempts)
+    echo $((current + 1)) > "$ATTEMPT_FILE"
+}
+
+reset_attempts() {
+    echo 0 > "$ATTEMPT_FILE"
+}
+
+check_lock() {
+    local attempts=$(current_attempts)
+    if [ "$attempts" -ge "$MAX_ATTEMPTS" ]; then
+        echo "🔒 Sistema bloqueado por $LOCK_TIME segundos"
+        sleep $LOCK_TIME
+        reset_attempts
+    fi
+}
+
+check_lock
+
+# Sua lógica de autenticação aqui
+EOF
+
+chmod 700 /usr/local/bin/login-monitor
+```
+
+### Configuração Final de Serviços
+
+```bash
+# Habilitar serviços essenciais
+systemctl enable NetworkManager
+systemctl enable iwd
+systemctl enable sshd
+systemctl enable fstrim.timer
+systemctl enable zram-generator
+
+# Configurar firewall restritivo
+ufw default deny incoming
+ufw default allow outgoing
+ufw limit ssh
+ufw enable
+
+# Configurar fail2ban agressivo
+cat > /etc/fail2ban/jail.d/ssh.local << EOF
+[sshd]
+enabled = true
+maxretry = 3
+bantime = 3600
+findtime = 600
+EOF
+
+systemctl enable fail2ban
+```
+
+### Pós-Instalação e Verificação
+
+```bash
+# Sair do chroot e finalizar
+exit
+
+# Verificar montagens
+umount -R /mnt
+swapoff /dev/zram0
+
+# Reiniciar para o sistema novo
+reboot
+```
+
+## 📝 Notas de Manutenção e Segurança
+
+### Backup Automático dos Headers LUKS
+```bash
+# Adicionar ao crontab do root
+0 2 * * * /usr/bin/cryptsetup luksHeaderBackup /dev/sda2 --header-backup-file /aux/backup/luks-header-sda2-$(date +%Y%m%d).img
+0 3 * * * /usr/bin/cryptsetup luksHeaderBackup /dev/sdd1 --header-backup-file /aux/backup/luks-header-sdd1-$(date +%Y%m%d).img
+```
+
+### Monitoramento de Segurança
+```bash
+# Instalar e configurar ferramentas de monitoramento
+pacman -S lynis rkhunter chkrootkit
+lynis audit system
+rkhunter --check
+```
+
+### Otimizações para 4GB RAM
+```bash
+# Configurar limites de memória para serviços
+mkdir -p /etc/systemd/system/nginx.service.d/
+cat > /etc/systemd/system/nginx.service.d/memory.conf << EOF
+[Service]
+MemoryMax=512M
+MemoryHigh=256M
+EOF
+```
+
+Este guia oferece segurança máxima enquanto mantém o desempenho adequado para sistemas com apenas 4GB de RAM. A configuração do zram ajuda significativamente no gerenciamento de memória, e todas as medidas de segurança são balanceadas para não sobrecarregar o sistema.
