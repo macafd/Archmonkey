@@ -1,19 +1,250 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# generate-arch-secure-setup.sh
+# Script gerador do pacote completo Arch Secure Setup - VERSÃO CORRIGIDA
+# Execute este script para criar todos os arquivos necessários
+
 set -euo pipefail
 
-echo "===[ FASE 1: Preparação do Live ISO ]==="
+# Cores
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
 
-timedatectl set-ntp true
-echo "[*] NTP ativado."
+echo -e "${BLUE}=== Gerando Arch Secure Setup (Versão Corrigida) ===${NC}"
 
-echo "[*] Discos detectados:"
-lsblk -o NAME,SIZE,TYPE
+# Verificar dependências básicas
+check_dependencies() {
+    local deps=("tar" "cat" "chmod")
+    for dep in "${deps[@]}"; do
+        if ! command -v "$dep" &> /dev/null; then
+            echo -e "${RED}Erro: $dep não encontrado!${NC}"
+            exit 1
+        fi
+    done
+}
 
-read -p "Informe o disco PRINCIPAL (ex: /dev/nvme0n1): " DISCO_SSD
-read -p "Informe o disco AUXILIAR (ex: /dev/sda): " DISCO_HDD
+check_dependencies
 
-echo "$DISCO_SSD" > /tmp/disco_principal.txt
-echo "$DISCO_HDD" > /tmp/disco_auxiliar.txt
+# Criar diretório
+mkdir -p arch-secure-setup
+cd arch-secure-setup
 
-echo "[*] Valores salvos em /tmp/disco_*.txt"
-echo "===[ Preparo concluído. Próxima etapa: ./fase2-disco-principal.sh ]==="
+# ============================================================================
+# FASE 1 - PREPARO
+# ============================================================================
+echo -e "${GREEN}Criando fase1-preparo.sh...${NC}"
+cat << 'EOF' > fase1-preparo.sh
+#!/bin/bash
+# fase1-preparo.sh - Detecção de hardware e preparação inicial
+set -euo pipefail
+
+# Cores
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Configuração
+SCRIPT_NAME="fase1-preparo"
+LOG_DIR="/var/log/arch-secure-setup"
+ENV_FILE="/tmp/arch_setup_vars.env"
+VERSION="1.0.0"
+
+# Variáveis globais
+DRY_RUN=false
+SIMULATE=false
+NON_INTERACTIVE=false
+CONFIG_FILE=""
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --dry-run) DRY_RUN=true; shift ;;
+            --simulate) SIMULATE=true; shift ;;
+            --non-interactive) NON_INTERACTIVE=true; CONFIG_FILE="${2:-config.json}"; shift 2 ;;
+            --help) show_help; exit 0 ;;
+            *) echo -e "${RED}Argumento desconhecido: $1${NC}"; exit 1 ;;
+        esac
+    done
+}
+
+show_help() {
+    cat << HELP
+Uso: $0 [OPÇÕES]
+
+OPÇÕES:
+    --dry-run           Simula execução sem fazer alterações
+    --simulate          Usa dispositivos loopback para teste
+    --non-interactive   Usa arquivo de configuração JSON
+    --help              Mostra esta ajuda
+HELP
+}
+
+check_commands() {
+    local cmds=("lsblk" "free" "nproc" "jq")
+    for cmd in "${cmds[@]}"; do
+        if [[ "$NON_INTERACTIVE" == "true" && "$cmd" == "jq" ]] || [[ "$cmd" != "jq" ]]; then
+            if ! command -v "$cmd" &>/dev/null; then
+                log "$RED" "Comando necessário não encontrado: $cmd"
+                exit 1
+            fi
+        fi
+    done
+}
+
+setup_logging() {
+    [[ "$SIMULATE" == "true" ]] && LOG_DIR="./logs"
+    mkdir -p "$LOG_DIR"
+    LOG_FILE="$LOG_DIR/${SCRIPT_NAME}-$(date '+%Y%m%d-%H%M%S').log"
+}
+
+log() {
+    local level="$1"; shift
+    echo -e "${level}[$(date '+%Y-%m-%d %H:%M:%S')] $*${NC}" | tee -a "$LOG_FILE"
+}
+
+check_requirements() {
+    log "$BLUE" "Verificando requisitos..."
+    
+    [[ $EUID -ne 0 ]] && { log "$RED" "Execute como root!"; exit 1; }
+    
+    check_commands
+    
+    # Detectar modo de boot
+    [[ -d /sys/firmware/efi ]] && BOOT_MODE="UEFI" || BOOT_MODE="BIOS"
+    
+    log "$GREEN" "Boot mode: $BOOT_MODE"
+}
+
+detect_hardware() {
+    log "$BLUE" "Detectando hardware..."
+    
+    CPU_CORES=$(nproc)
+    MEM_TOTAL=$(free -h | awk '/^Mem:/ {print $2}')
+    
+    mapfile -t DISKS < <(lsblk -rno NAME,TYPE,SIZE | awk '$2=="disk" {print "/dev/"$1"|"$3}')
+    
+    if [[ ${#DISKS[@]} -eq 0 ]]; then
+        log "$RED" "Nenhum disco detectado!"
+        exit 1
+    fi
+    
+    for disk in "${DISKS[@]}"; do
+        IFS='|' read -r device size <<< "$disk"
+        log "$NC" "  Disco: $device - $size"
+    done
+}
+
+validate_config_file() {
+    if [[ "$NON_INTERACTIVE" == "true" ]]; then
+        if [[ ! -f "$CONFIG_FILE" ]]; then
+            log "$RED" "Arquivo de configuração não encontrado: $CONFIG_FILE"
+            exit 1
+        fi
+        
+        # Validar campos obrigatórios
+        local required_fields=("disco_principal" "hostname" "username")
+        for field in "${required_fields[@]}"; do
+            if ! jq -e ".$field" "$CONFIG_FILE" &>/dev/null; then
+                log "$RED" "Campo obrigatório ausente no config: $field"
+                exit 1
+            fi
+        done
+    fi
+}
+
+select_disks() {
+    if [[ "$NON_INTERACTIVE" == "true" ]]; then
+        validate_config_file
+        DISCO_PRINCIPAL=$(jq -r '.disco_principal' "$CONFIG_FILE")
+        DISCO_AUXILIAR=$(jq -r '.disco_auxiliar // ""' "$CONFIG_FILE")
+        
+        # Validar que os discos existem
+        if [[ ! -b "$DISCO_PRINCIPAL" ]]; then
+            log "$RED" "Disco principal não existe: $DISCO_PRINCIPAL"
+            exit 1
+        fi
+        
+        if [[ -n "$DISCO_AUXILIAR" && ! -b "$DISCO_AUXILIAR" ]]; then
+            log "$RED" "Disco auxiliar não existe: $DISCO_AUXILIAR"
+            exit 1
+        fi
+    else
+        echo -e "${YELLOW}Discos disponíveis:${NC}"
+        local i=1
+        for disk in "${DISKS[@]}"; do
+            IFS='|' read -r device size <<< "$disk"
+            echo "  $i) $device - $size"
+            ((i++))
+        done
+        
+        echo -e "${YELLOW}Número do disco PRINCIPAL:${NC}"
+        read -r disk_num
+        
+        if [[ ! "$disk_num" =~ ^[0-9]+$ ]] || [[ "$disk_num" -lt 1 ]] || [[ "$disk_num" -gt ${#DISKS[@]} ]]; then
+            log "$RED" "Número de disco inválido!"
+            exit 1
+        fi
+        
+        IFS='|' read -r DISCO_PRINCIPAL _ <<< "${DISKS[$((disk_num-1))]}"
+        
+        echo -e "${YELLOW}Disco AUXILIAR? [s/N]:${NC}"
+        read -r aux
+        if [[ "$aux" =~ ^[Ss]$ ]]; then
+            echo -e "${YELLOW}Número do disco AUXILIAR:${NC}"
+            read -r disk_num
+            
+            if [[ ! "$disk_num" =~ ^[0-9]+$ ]] || [[ "$disk_num" -lt 1 ]] || [[ "$disk_num" -gt ${#DISKS[@]} ]]; then
+                log "$RED" "Número de disco inválido!"
+                exit 1
+            fi
+            
+            IFS='|' read -r DISCO_AUXILIAR _ <<< "${DISKS[$((disk_num-1))]}"
+        else
+            DISCO_AUXILIAR=""
+        fi
+    fi
+}
+
+save_configuration() {
+    cat > "$ENV_FILE" << CONFIG
+export DRY_RUN="$DRY_RUN"
+export SIMULATE="$SIMULATE"
+export NON_INTERACTIVE="$NON_INTERACTIVE"
+export CONFIG_FILE="$CONFIG_FILE"
+export BOOT_MODE="$BOOT_MODE"
+export CPU_CORES="$CPU_CORES"
+export MEM_TOTAL="$MEM_TOTAL"
+export DISCO_PRINCIPAL="$DISCO_PRINCIPAL"
+export DISCO_AUXILIAR="$DISCO_AUXILIAR"
+CONFIG
+    log "$GREEN" "Configuração salva em $ENV_FILE"
+}
+
+main() {
+    parse_args "$@"
+    setup_logging
+    log "$BLUE" "=== FASE 1: PREPARAÇÃO ==="
+    check_requirements
+    detect_hardware
+    select_disks
+    
+    if [[ "$DRY_RUN" != "true" && "$NON_INTERACTIVE" != "true" ]]; then
+        echo -e "${RED}AVISO: OS DISCOS SELECIONADOS SERÃO FORMATADOS!${NC}"
+        echo -e "${RED}Disco principal: $DISCO_PRINCIPAL${NC}"
+        [[ -n "$DISCO_AUXILIAR" ]] && echo -e "${RED}Disco auxiliar: $DISCO_AUXILIAR${NC}"
+        echo -e "${RED}TODOS OS DADOS SERÃO PERDIDOS!${NC}"
+        echo -e "${RED}Digite CONFIRM para continuar:${NC}"
+        read -r confirm
+        [[ "$confirm" != "CONFIRM" ]] && { log "$YELLOW" "Operação cancelada"; exit 0; }
+    fi
+    
+    save_configuration
+    log "$GREEN" "Fase 1 concluída! Próximo: ./fase2-disco-principal.sh"
+}
+
+main "$@"
+EOF
