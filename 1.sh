@@ -1,7 +1,7 @@
 #!/bin/bash
-# generate-arch-secure-setup.sh
-# Script gerador do pacote completo Arch Secure Setup - VERSÃO CORRIGIDA
-# Execute este script para criar todos os arquivos necessários
+# generate-arch-secure-setup-corrigido.sh
+# Script gerador do pacote completo Arch Secure Setup - VERSÃO TOTALMENTE CORRIGIDA
+# Execute este script para criar todos os arquivos necessários com correções aplicadas
 
 set -euo pipefail
 
@@ -32,7 +32,7 @@ mkdir -p arch-secure-setup
 cd arch-secure-setup
 
 # ============================================================================
-# FASE 1 - PREPARO
+# FASE 1 - PREPARO (CORRIGIDA)
 # ============================================================================
 echo -e "${GREEN}Criando fase1-preparo.sh...${NC}"
 cat << 'EOF' > fase1-preparo.sh
@@ -84,15 +84,21 @@ HELP
 }
 
 check_commands() {
-    local cmds=("lsblk" "free" "nproc" "jq")
+    local cmds=("lsblk" "free" "nproc")
     for cmd in "${cmds[@]}"; do
-        if [[ "$NON_INTERACTIVE" == "true" && "$cmd" == "jq" ]] || [[ "$cmd" != "jq" ]]; then
-            if ! command -v "$cmd" &>/dev/null; then
-                log "$RED" "Comando necessário não encontrado: $cmd"
-                exit 1
-            fi
+        if ! command -v "$cmd" &>/dev/null; then
+            log "$RED" "Comando necessário não encontrado: $cmd"
+            exit 1
         fi
     done
+    
+    # jq apenas se modo non-interactive
+    if [[ "$NON_INTERACTIVE" == "true" ]]; then
+        if ! command -v "jq" &>/dev/null; then
+            log "$RED" "jq necessário para modo non-interactive!"
+            exit 1
+        fi
+    fi
 }
 
 setup_logging() {
