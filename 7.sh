@@ -1,65 +1,243 @@
-#!/usr/bin/env bash
+
+# ============================================================================
+# FASE 7 - AUTODESTRUIÇÃO 
+# ============================================================================
+cat << 'EOF_FASE7' > fase7-autodestruicao.sh
+#!/bin/bash
+# fase7-autodestruicao.sh - Configuração de autodestruição de emergência
+# AVISO: Este recurso é EXTREMAMENTE PERIGOSO e IRREVERSÍVEL!
+
 set -euo pipefail
 
-echo "===[ FASE 7: Autodestruição ]==="
+# Cores
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
 
-# runtime
-cat >/usr/local/bin/selfdestruct-now.sh <<'EOF'
-#!/usr/bin/env bash
+# Configuração
+SCRIPT_NAME="fase7-autodestruicao"
+LOG_DIR="/var/log/arch-secure-setup"
+SELFDESTRUCT_SCRIPT="/usr/local/bin/selfdestruct-now.sh"
+
+# Setup logging
+setup_logging() {
+    mkdir -p "$LOG_DIR"
+    LOG_FILE="$LOG_DIR/${SCRIPT_NAME}-$(date '+%Y%m%d-%H%M%S').log"
+}
+
+log() {
+    local level="$1"
+    shift
+    echo -e "${level}[$(date '+%Y-%m-%d %H:%M:%S')] $*${NC}" | tee -a "$LOG_FILE"
+}
+
+# Criar script de autodestruição runtime
+create_selfdestruct_script() {
+    log "$BLUE" "Criando script de autodestruição"
+    
+    cat > "$SELFDESTRUCT_SCRIPT" << 'EOF'
+#!/bin/bash
+# selfdestruct-now.sh - Autodestruição de emergência
+# AVISO: ISTO DESTRUIRÁ PERMANENTEMENTE TODOS OS DADOS!
+
 set -euo pipefail
-echo "[*] Destruindo headers LUKS..."
-cryptsetup luksErase /dev/nvme0n1p3 || true
-cryptsetup luksErase /dev/sda1      || true
-swapoff -a || true
-if [ -b /dev/mapper/cryptswap ]; then
-  dd if=/dev/zero of=/dev/mapper/cryptswap bs=16M status=progress || true
+
+# Cores
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+# Verificar root
+if [[ $EUID -ne 0 ]]; then
+    echo -e "${RED}ERRO: Execute como root${NC}"
+    exit 1
 fi
-blkdiscard -f /dev/nvme0n1 || true
-dd if=/dev/zero of=/dev/sda bs=16M status=progress oflag=direct || true
-systemctl poweroff -f
-EOF
-chmod +x /usr/local/bin/selfdestruct-now.sh
 
-# initramfs hook
-mkdir -p /etc/initcpio/hooks /etc/initcpio/install
-cat >/etc/initcpio/hooks/selfdestruct <<'EOF'
-run_hook() {
-  if ! grep -qw 'selfdestruct=1' /proc/cmdline; then
-    return
-  fi
-  echo "[initramfs] AUTODESTRUIÇÃO ATIVA!"
-  cryptsetup luksErase /dev/nvme0n1p3 || true
-  cryptsetup luksErase /dev/sda1      || true
-  blkdiscard -f /dev/nvme0n1 || true
-  dd if=/dev/zero of=/dev/sda bs=16M status=progress oflag=direct || true
-  poweroff -f
+# Verificar modo
+if [[ "${1:-}" == "--simulate" ]]; then
+    SIMULATE=true
+    echo -e "${YELLOW}MODO SIMULAÇÃO - Nenhuma operação destrutiva será realizada${NC}"
+else
+    SIMULATE=false
+fi
+
+# Função de destruição
+destroy_data() {
+    local device="$1"
+    
+    if [[ "$SIMULATE" == "true" ]]; then
+        echo -e "${YELLOW}[SIMULATE] Destruiria: $device${NC}"
+        return
+    fi
+    
+    echo -e "${RED}Destruindo $device...${NC}"
+    
+    # Tentar apagar headers LUKS
+    if cryptsetup isLuks "$device" 2>/dev/null; then
+        echo "  Apagando headers LUKS..."
+        cryptsetup luksErase "$device" --batch-mode || true
+    fi
+    
+    # Verificar se suporta TRIM/discard
+    if hdparm -I "$device" 2>/dev/null | grep -q "TRIM supported"; then
+        echo "  Executando secure erase via TRIM..."
+        blkdiscard -s "$device" || true
+    else
+        echo "  Sobrescrevendo com dados aleatórios (primeiros 100MB)..."
+        dd if=/dev/urandom of="$device" bs=1M count=100 oflag=direct status=progress || true
+    fi
 }
-EOF
 
-cat >/etc/initcpio/install/selfdestruct <<'EOF'
-build() {
-  add_binary cryptsetup
-  add_binary blkdiscard
-  add_binary dd
-  add_runscript
+# Confirmação final
+if [[ "$SIMULATE" != "true" ]]; then
+    echo -e "${RED}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}║                    AUTODESTRUIÇÃO TOTAL                      ║${NC}"
+    echo -e "${RED}║                                                              ║${NC}"
+    echo -e "${RED}║        TODOS OS DADOS SERÃO PERMANENTEMENTE DESTRUÍDOS!      ║${NC}"
+    echo -e "${RED}║                                                              ║${NC}"
+    echo -e "${RED}║                  ESTA AÇÃO É IRREVERSÍVEL!                   ║${NC}"
+    echo -e "${RED}║                                                              ║${NC}"
+    echo -e "${RED}║         Digite: DESTROY-ALL-DATA para continuar              ║${NC}"
+    echo -e "${RED}╚══════════════════════════════════════════════════════════════╝${NC}"
+    
+    read -r confirmation
+    if [[ "$confirmation" != "DESTROY-ALL-DATA" ]]; then
+        echo -e "${YELLOW}Operação cancelada${NC}"
+        exit 0
+    fi
+    
+    echo -e "${RED}Última chance! Digite novamente: DESTROY-ALL-DATA${NC}"
+    read -r final_confirmation
+    if [[ "$final_confirmation" != "DESTROY-ALL-DATA" ]]; then
+        echo -e "${YELLOW}Operação cancelada${NC}"
+        exit 0
+    fi
+fi
+
+echo -e "${RED}Iniciando sequência de autodestruição...${NC}"
+
+# Desmontar tudo
+echo "Desmontando sistemas de arquivos..."
+if [[ "$SIMULATE" != "true" ]]; then
+    swapoff -a 2>/dev/null || true
+    umount -a -r 2>/dev/null || true
+fi
+
+# Destruir swap
+if [[ -b /dev/mapper/cryptswap ]]; then
+    destroy_data /dev/mapper/cryptswap
+fi
+
+# Listar e destruir todos os dispositivos de bloco
+for device in $(lsblk -rno NAME,TYPE | awk '$2=="disk" {print "/dev/"$1}'); do
+    if [[ -b "$device" ]]; then
+        destroy_data "$device"
+    fi
+done
+
+# Para cada partição
+for device in $(lsblk -rno NAME,TYPE | awk '$2=="part" {print "/dev/"$1}'); do
+    if [[ -b "$device" ]]; then
+        destroy_data "$device"
+    fi
+done
+
+if [[ "$SIMULATE" == "true" ]]; then
+    echo -e "${YELLOW}[SIMULATE] Simulação concluída - nenhum dado foi destruído${NC}"
+else
+    echo -e "${RED}DESTRUIÇÃO COMPLETA!${NC}"
+    echo -e "${RED}Desligando sistema...${NC}"
+    poweroff -f
+fi
+EOF
+    
+    chmod +x "$SELFDESTRUCT_SCRIPT"
+    log "$GREEN" "Script de autodestruição criado: $SELFDESTRUCT_SCRIPT"
 }
+
+# Criar alias seguro
+create_safe_alias() {
+    log "$BLUE" "Criando alias de segurança"
+    
+    # Adicionar ao bashrc do root
+    cat >> /root/.bashrc << 'EOF'
+
+# Alias de autodestruição com confirmação
+alias panic='echo "Use: selfdestruct-now.sh (requer confirmação)"'
+alias destroy='echo "Use: selfdestruct-now.sh (requer confirmação)"'
 EOF
-
-# adicionar ao mkinitcpio
-sed -i 's|HOOKS=(.*)|HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt selfdestruct btrfs filesystems fsck)|' /etc/mkinitcpio.conf
-mkinitcpio -P
-
-# entrada no GRUB
-cat >>/etc/grub.d/40_custom <<'EOF'
-menuentry 'Autodestruição do Sistema (profunda)' {
-    insmod part_gpt
-    insmod fat
-    search --no-floppy --fs-uuid --set=root $(blkid -s UUID -o value /dev/nvme0n1p1)
-    linux /vmlinuz-linux selfdestruct=1 quiet
-    initrd /amd-ucode.img /intel-ucode.img /initramfs-linux.img
+    
+    log "$GREEN" "Aliases de segurança criados"
 }
-EOF
 
-grub-mkconfig -o /boot/grub/grub.cfg
+# Informações de uso
+show_usage_info() {
+    echo
+    echo -e "${RED}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}║           SISTEMA DE AUTODESTRUIÇÃO INSTALADO                ║${NC}"
+    echo -e "${RED}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo
+    echo -e "${YELLOW}COMPONENTES INSTALADOS:${NC}"
+    echo
+    echo -e "${BLUE}1. Script de autodestruição runtime:${NC}"
+    echo -e "   ${GREEN}$SELFDESTRUCT_SCRIPT${NC}"
+    echo -e "   Para testar: ${YELLOW}$SELFDESTRUCT_SCRIPT --simulate${NC}"
+    echo -e "   Para executar: ${RED}$SELFDESTRUCT_SCRIPT${NC}"
+    echo
+    echo -e "${BLUE}2. Hook initramfs (se habilitado na fase 5):${NC}"
+    echo -e "   Ativado por: ${YELLOW}selfdestruct=1${NC} no kernel cmdline"
+    echo -e "   Entrada GRUB disponível no menu de boot"
+    echo
+    echo -e "${RED}AVISOS IMPORTANTES:${NC}"
+    echo -e "- A autodestruição é ${RED}IRREVERSÍVEL${NC}"
+    echo -e "- Mantenha backups dos headers LUKS em local seguro"
+    echo -e "- Teste primeiro com ${YELLOW}--simulate${NC}"
+    echo -e "- Requer confirmação dupla digitando: ${RED}DESTROY-ALL-DATA${NC}"
+    echo
+}
 
-echo "===[ Autodestruição instalada. Setup concluído! ]==="
+# Função principal
+main() {
+    setup_logging
+    
+    log "$BLUE" "=== FASE 7: CONFIGURAÇÃO DE AUTODESTRUIÇÃO ==="
+    
+    echo -e "${RED}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}║                         ATENÇÃO!                             ║${NC}"
+    echo -e "${RED}║                                                              ║${NC}"
+    echo -e "${RED}║     Este recurso permite a DESTRUIÇÃO TOTAL dos dados!       ║${NC}"
+    echo -e "${RED}║                                                              ║${NC}"
+    echo -e "${RED}║              Use apenas se absolutamente necessário          ║${NC}"
+    echo -e "${RED}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo
+    echo -e "${YELLOW}Instalar sistema de autodestruição? [s/N]:${NC}"
+    read -r install_input
+    
+    if [[ ! "$install_input" =~ ^[Ss]$ ]]; then
+        log "$YELLOW" "Instalação cancelada"
+        exit 0
+    fi
+    
+    echo -e "${RED}Digite CONFIRM para instalar o sistema de autodestruição:${NC}"
+    read -r confirmation
+    
+    if [[ "$confirmation" != "CONFIRM" ]]; then
+        log "$YELLOW" "Instalação cancelada"
+        exit 0
+    fi
+    
+    create_selfdestruct_script
+    create_safe_alias
+    
+    log "$GREEN" "=== FASE 7 CONCLUÍDA ==="
+    
+    show_usage_info
+}
+
+main
+EOF_FASE7
+
+
