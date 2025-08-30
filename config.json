@@ -1,0 +1,30 @@
+# ============================================================================
+# CONFIG EXAMPLE 
+# ============================================================================
+echo -e "${GREEN}Criando config.example.json...${NC}"
+cat << 'EOF' > config.example.json
+{
+  "disco_principal": "/dev/nvme0n1",
+  "disco_auxiliar": "/dev/sda",
+  "usb_backup": "/dev/sdb1",
+  "swap_gib": 8,
+  "hostname": "archlinux",
+  "username": "usuario",
+  "user_password": "CHANGE_ME",
+  "root_password": "CHANGE_ME",
+  "luks_root_password": "CHANGE_ME",
+  "luks_aux_password": "CHANGE_ME",
+  "reuse_luks_password": false,
+  "timezone": "America/Sao_Paulo",
+  "locale": "pt_BR.UTF-8",
+  "luks_root_iter_time": 5000,
+  "luks_root_pbkdf_memory": 524288,
+  "luks_aux_pbkdf_memory": 262144,
+  "btrfs_compress_level": 3,
+  "linux_only": false,
+  "retain_backups_days": 7,
+  "enable_backup_timer": false,
+  "autodestruct_enabled": false,
+  "simulate": false
+}
+EOF
