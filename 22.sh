@@ -1,7 +1,3 @@
-# ============================================================================
-# FASE 2 - DISCO PRINCIPAL
-# ============================================================================
-cat << 'EOF' > fase2-disco-principal.sh
 #!/bin/bash
 # fase2-disco-principal.sh - Particionamento e criptografia do disco principal
 set -euo pipefail
@@ -34,7 +30,7 @@ log() {
 }
 
 check_commands() {
-    local cmds=("cryptsetup" "parted" "mkfs.btrfs" "mkfs.ext4" "mkfs.vfat" "btrfs" "blkid" "wipefs" "partprobe" "mkswap")
+    local cmds=("cryptsetup" "parted" "mkfs.btrfs" "mkfs.ext4" "mkfs.vfat" "btrfs" "blkid" "wipefs" "partprobe" "mkswap" "lsblk" "dmsetup" "fuser")
     local missing=()
     
     for cmd in "${cmds[@]}"; do
@@ -45,7 +41,7 @@ check_commands() {
     
     if [[ ${#missing[@]} -gt 0 ]]; then
         log "$RED" "Comandos necessarios nao encontrados: ${missing[*]}"
-        log "$YELLOW" "Instale com: pacman -S cryptsetup parted btrfs-progs dosfstools util-linux"
+        log "$YELLOW" "Instale com: pacman -S cryptsetup parted btrfs-progs dosfstools util-linux lvm2 psmisc"
         exit 1
     fi
 }
@@ -134,6 +130,66 @@ get_configuration() {
     fi
 }
 
+# NOVA FUNÇÃO: Limpar completamente o disco e suas dependências
+cleanup_disk() {
+    local device="$1"
+    log "$YELLOW" "Limpando completamente o disco $device..."
+    
+    # 1. Desmontar todas as partições do disco
+    log "$BLUE" "Desmontando particoes..."
+    for mount_point in $(mount | grep "^${device}" | awk '{print $1}'); do
+        log "$YELLOW" "  Desmontando $mount_point..."
+        umount -f "$mount_point" 2>/dev/null || true
+    done
+    
+    # 2. Fechar volumes LUKS
+    log "$BLUE" "Fechando volumes LUKS..."
+    for luks_dev in $(dmsetup ls --target crypt | awk '{print $1}'); do
+        if cryptsetup status "$luks_dev" 2>/dev/null | grep -q "${device}"; then
+            log "$YELLOW" "  Fechando volume LUKS: $luks_dev..."
+            cryptsetup close "$luks_dev" 2>/dev/null || true
+        fi
+    done
+    
+    # 3. Desativar swap se estiver no disco
+    log "$BLUE" "Desativando swap..."
+    for swap_part in $(swapon -s | grep "^${device}" | awk '{print $1}'); do
+        log "$YELLOW" "  Desativando swap em $swap_part..."
+        swapoff "$swap_part" 2>/dev/null || true
+    done
+    
+    # 4. Remover LVM se existir
+    log "$BLUE" "Removendo volumes LVM..."
+    if command -v vgchange &>/dev/null; then
+        vgchange -an 2>/dev/null || true
+    fi
+    
+    # 5. Limpar device mapper
+    log "$BLUE" "Limpando device mapper..."
+    dmsetup remove_all --force 2>/dev/null || true
+    
+    # 6. Terminar processos usando o disco
+    log "$BLUE" "Terminando processos usando o disco..."
+    if command -v fuser &>/dev/null; then
+        fuser -km "$device" 2>/dev/null || true
+    fi
+    
+    # 7. Sincronizar e aguardar
+    sync
+    sleep 2
+    
+    # 8. Forçar kernel a reler tabela de partições vazia
+    log "$BLUE" "Limpando tabela de particoes..."
+    dd if=/dev/zero of="$device" bs=512 count=34 2>/dev/null || true
+    dd if=/dev/zero of="$device" bs=512 count=34 seek=$(( $(blockdev --getsz "$device") - 34 )) 2>/dev/null || true
+    
+    # 9. Informar kernel sobre mudanças
+    partprobe "$device" 2>/dev/null || true
+    sleep 1
+    
+    log "$GREEN" "Limpeza do disco concluida"
+}
+
 check_disk_mounted() {
     if mount | grep -q "$DISCO_PRINCIPAL"; then
         log "$RED" "Disco $DISCO_PRINCIPAL esta montado! Desmonte primeiro."
@@ -166,34 +222,104 @@ partition_disk() {
     
     [[ "$DRY_RUN" == "true" ]] && { log "$YELLOW" "DRY-RUN: Pulando particionamento"; return; }
     
-    check_disk_mounted
+    # IMPORTANTE: Limpar completamente o disco antes de particionar
+    cleanup_disk "$DISCO_PRINCIPAL"
+    
+    # Limpar de forma segura
     secure_wipe "$DISCO_PRINCIPAL"
     
-    partprobe "$DISCO_PRINCIPAL" 2>/dev/null || true
-    sleep 1
+    # Aguardar kernel processar mudanças
+    sleep 2
     
+    # Criar nova tabela de partições com tratamento de erro
     if [[ "$BOOT_MODE" == "UEFI" ]]; then
         log "$BLUE" "Criando tabela de particoes GPT (UEFI)..."
-        parted -s "$DISCO_PRINCIPAL" \
-            mklabel gpt \
-            mkpart ESP fat32 1MiB 513MiB \
-            set 1 esp on \
-            mkpart BOOT ext4 513MiB 1537MiB \
-            mkpart SWAP linux-swap 1537MiB $((1537 + SWAPSIZE_GiB * 1024))MiB \
-            mkpart ROOT $((1537 + SWAPSIZE_GiB * 1024))MiB 100%
+        
+        # Criar tabela GPT primeiro
+        if ! parted -s "$DISCO_PRINCIPAL" mklabel gpt; then
+            log "$RED" "Erro ao criar tabela GPT!"
+            exit 1
+        fi
+        
+        # Criar partições uma por vez com verificação
+        log "$BLUE" "Criando particao ESP..."
+        if ! parted -s "$DISCO_PRINCIPAL" mkpart ESP fat32 1MiB 513MiB; then
+            log "$RED" "Erro ao criar particao ESP!"
+            exit 1
+        fi
+        parted -s "$DISCO_PRINCIPAL" set 1 esp on
+        partprobe "$DISCO_PRINCIPAL" 2>/dev/null || true
+        sleep 1
+        
+        log "$BLUE" "Criando particao BOOT..."
+        if ! parted -s "$DISCO_PRINCIPAL" mkpart BOOT ext4 513MiB 1537MiB; then
+            log "$RED" "Erro ao criar particao BOOT!"
+            exit 1
+        fi
+        partprobe "$DISCO_PRINCIPAL" 2>/dev/null || true
+        sleep 1
+        
+        log "$BLUE" "Criando particao SWAP..."
+        if ! parted -s "$DISCO_PRINCIPAL" mkpart SWAP linux-swap 1537MiB $((1537 + SWAPSIZE_GiB * 1024))MiB; then
+            log "$RED" "Erro ao criar particao SWAP!"
+            exit 1
+        fi
+        partprobe "$DISCO_PRINCIPAL" 2>/dev/null || true
+        sleep 1
+        
+        log "$BLUE" "Criando particao ROOT..."
+        if ! parted -s "$DISCO_PRINCIPAL" mkpart ROOT $((1537 + SWAPSIZE_GiB * 1024))MiB 100%; then
+            log "$RED" "Erro ao criar particao ROOT!"
+            exit 1
+        fi
+        
     else
         log "$BLUE" "Criando tabela de particoes MBR (BIOS)..."
-        parted -s "$DISCO_PRINCIPAL" \
-            mklabel msdos \
-            mkpart primary ext4 1MiB 1025MiB \
-            set 1 boot on \
-            mkpart primary linux-swap 1025MiB $((1025 + SWAPSIZE_GiB * 1024))MiB \
-            mkpart primary $((1025 + SWAPSIZE_GiB * 1024))MiB 100%
+        
+        # Criar tabela MBR primeiro
+        if ! parted -s "$DISCO_PRINCIPAL" mklabel msdos; then
+            log "$RED" "Erro ao criar tabela MBR!"
+            exit 1
+        fi
+        
+        # Criar partições uma por vez
+        log "$BLUE" "Criando particao BOOT..."
+        if ! parted -s "$DISCO_PRINCIPAL" mkpart primary ext4 1MiB 1025MiB; then
+            log "$RED" "Erro ao criar particao BOOT!"
+            exit 1
+        fi
+        parted -s "$DISCO_PRINCIPAL" set 1 boot on
+        partprobe "$DISCO_PRINCIPAL" 2>/dev/null || true
+        sleep 1
+        
+        log "$BLUE" "Criando particao SWAP..."
+        if ! parted -s "$DISCO_PRINCIPAL" mkpart primary linux-swap 1025MiB $((1025 + SWAPSIZE_GiB * 1024))MiB; then
+            log "$RED" "Erro ao criar particao SWAP!"
+            exit 1
+        fi
+        partprobe "$DISCO_PRINCIPAL" 2>/dev/null || true
+        sleep 1
+        
+        log "$BLUE" "Criando particao ROOT..."
+        if ! parted -s "$DISCO_PRINCIPAL" mkpart primary $((1025 + SWAPSIZE_GiB * 1024))MiB 100%; then
+            log "$RED" "Erro ao criar particao ROOT!"
+            exit 1
+        fi
     fi
     
+    # Forçar kernel a reler tabela de partições múltiplas vezes
+    log "$BLUE" "Sincronizando tabela de particoes com kernel..."
+    sync
     sleep 2
-    partprobe "$DISCO_PRINCIPAL"
-    sleep 1
+    
+    for i in {1..3}; do
+        partprobe "$DISCO_PRINCIPAL" 2>/dev/null || true
+        sleep 1
+    done
+    
+    # Usar blockdev para forçar releitura
+    blockdev --rereadpt "$DISCO_PRINCIPAL" 2>/dev/null || true
+    sleep 2
     
     # Detectar particoes corretamente
     if [[ "$DISCO_PRINCIPAL" =~ nvme|mmcblk|loop ]]; then
@@ -214,10 +340,40 @@ partition_disk() {
         ROOT_PART="${PART_PREFIX}3"
     fi
     
+    # Aguardar dispositivos aparecerem
+    log "$BLUE" "Aguardando dispositivos de particao..."
+    local max_wait=10
+    local wait_count=0
+    
+    while [[ $wait_count -lt $max_wait ]]; do
+        local all_found=true
+        
+        for part in $BOOT_PART $SWAP_PART $ROOT_PART; do
+            if [[ ! -b "$part" ]]; then
+                all_found=false
+                break
+            fi
+        done
+        
+        if [[ "$BOOT_MODE" == "UEFI" ]] && [[ ! -b "$ESP_PART" ]]; then
+            all_found=false
+        fi
+        
+        if [[ "$all_found" == "true" ]]; then
+            break
+        fi
+        
+        sleep 1
+        ((wait_count++))
+        log "$YELLOW" "  Aguardando... ($wait_count/$max_wait)"
+    done
+    
     # Verificar se as particoes foram criadas
     for part in $BOOT_PART $SWAP_PART $ROOT_PART; do
         if [[ ! -b "$part" ]]; then
             log "$RED" "Erro: Particao $part nao foi criada!"
+            log "$YELLOW" "Tente executar: partprobe $DISCO_PRINCIPAL"
+            log "$YELLOW" "Ou reinicie o sistema e execute novamente"
             exit 1
         fi
     done
@@ -228,12 +384,22 @@ partition_disk() {
     fi
     
     log "$GREEN" "Particoes criadas com sucesso"
+    
+    # Listar partições para confirmação
+    log "$BLUE" "Particoes criadas:"
+    lsblk "$DISCO_PRINCIPAL"
 }
 
 create_luks() {
     log "$BLUE" "Criando volume LUKS no root..."
     
     [[ "$DRY_RUN" == "true" ]] && { log "$YELLOW" "DRY-RUN: Pulando LUKS"; return; }
+    
+    # Verificar se a partição existe
+    if [[ ! -b "$ROOT_PART" ]]; then
+        log "$RED" "Erro: Particao $ROOT_PART nao existe!"
+        exit 1
+    fi
     
     # Ajustar memoria PBKDF baseado na RAM disponivel
     local mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
@@ -257,6 +423,12 @@ create_luks() {
     echo -n "$LUKS_PASSWORD" | cryptsetup open "$ROOT_PART" cryptroot - || \
         { log "$RED" "Erro ao abrir volume LUKS!"; exit 1; }
     
+    # Verificar se o volume foi aberto
+    if [[ ! -b /dev/mapper/cryptroot ]]; then
+        log "$RED" "Erro: Volume LUKS nao foi aberto corretamente!"
+        exit 1
+    fi
+    
     # Obter UUID do root LUKS
     ROOT_UUID=$(blkid -s UUID -o value "$ROOT_PART")
     
@@ -276,15 +448,18 @@ create_filesystems() {
     # ESP (apenas UEFI)
     if [[ "$BOOT_MODE" == "UEFI" ]]; then
         log "$BLUE" "Formatando ESP..."
+        wipefs -a "$ESP_PART" 2>/dev/null || true
         mkfs.vfat -F32 -n ESP "$ESP_PART" || { log "$RED" "Erro ao formatar ESP!"; exit 1; }
     fi
     
     # Boot
     log "$BLUE" "Formatando /boot..."
+    wipefs -a "$BOOT_PART" 2>/dev/null || true
     mkfs.ext4 -L BOOT "$BOOT_PART" || { log "$RED" "Erro ao formatar boot!"; exit 1; }
     
     # Swap - IMPORTANTE: criar filesystem de swap antes de obter UUID
     log "$BLUE" "Formatando swap..."
+    wipefs -a "$SWAP_PART" 2>/dev/null || true
     mkswap -L SWAP "$SWAP_PART" || { log "$RED" "Erro ao formatar swap!"; exit 1; }
     
     # Obter UUID do swap APOS criar o filesystem
@@ -299,6 +474,7 @@ create_filesystems() {
     
     # Root (Btrfs)
     log "$BLUE" "Formatando root com Btrfs..."
+    wipefs -a /dev/mapper/cryptroot 2>/dev/null || true
     mkfs.btrfs -L ROOT /dev/mapper/cryptroot || { log "$RED" "Erro ao formatar root!"; exit 1; }
     
     # Montar e criar subvolumes
@@ -376,4 +552,3 @@ main() {
 }
 
 main
-EOF
