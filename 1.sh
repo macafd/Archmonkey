@@ -1,7 +1,7 @@
-
-
-
 #!/bin/bash
+# ARCH SECURE SETUP - VERSÃO CORRIGIDA E COMPLETA
+# Este script gera todos os arquivos necessários para instalação segura do Arch Linux
+
 set -euo pipefail
 
 # Cores
@@ -11,18 +11,18 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-echo -e "${BLUE}=== Gerando Arch Secure Setup (Versao Final Corrigida) ===${NC}"
+echo -e "${BLUE}=== Gerando Arch Secure Setup (Versão Corrigida) ===${NC}"
 
-# Criar diretorio
+# Criar diretório
 mkdir -p arch-secure-setup
 cd arch-secure-setup
 
 # ============================================================================
-# FASE 1 - PREPARO
+# FASE 1 - PREPARO (JÁ REVISADO - MANTIDO COMO ESTÁ)
 # ============================================================================
 cat << 'EOF' > fase1-preparo.sh
 #!/bin/bash
-# fase1-preparo.sh - Deteccao de hardware e preparacao inicial
+# fase1-preparo.sh - Detecção de hardware e preparação inicial
 set -euo pipefail
 
 # Cores
@@ -32,13 +32,13 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-# Configuracao
+# Configuração
 SCRIPT_NAME="fase1-preparo"
 LOG_DIR="/var/log/arch-secure-setup"
 ENV_FILE="/tmp/arch_setup_vars.env"
 VERSION="1.2.0"
 
-# Variaveis globais
+# Variáveis globais
 DRY_RUN=false
 SIMULATE=false
 NON_INTERACTIVE=false
@@ -52,7 +52,6 @@ parse_args() {
             --non-interactive) 
                 NON_INTERACTIVE=true
                 CONFIG_FILE="${2:-config.json}"
-                # Converter para caminho absoluto
                 if command -v realpath &>/dev/null; then
                     CONFIG_FILE="$(realpath "$CONFIG_FILE" 2>/dev/null || echo "$CONFIG_FILE")"
                 else
@@ -68,12 +67,12 @@ parse_args() {
 
 show_help() {
     cat << HELP
-Uso: $0 [OPCOES]
+Uso: $0 [OPÇÕES]
 
-OPCOES:
-    --dry-run           Simula execucao sem fazer alteracoes
+OPÇÕES:
+    --dry-run           Simula execução sem fazer alterações
     --simulate          Usa dispositivos loopback para teste
-    --non-interactive   Usa arquivo de configuracao JSON
+    --non-interactive   Usa arquivo de configuração JSON
     --help              Mostra esta ajuda
 HELP
 }
@@ -89,14 +88,14 @@ check_commands() {
     done
     
     if [[ ${#missing[@]} -gt 0 ]]; then
-        log "$RED" "Comandos necessarios nao encontrados: ${missing[*]}"
+        log "$RED" "Comandos necessários não encontrados: ${missing[*]}"
         log "$YELLOW" "Instale: pacman -S util-linux procps-ng coreutils"
         exit 1
     fi
     
     if [[ "$NON_INTERACTIVE" == "true" ]]; then
         if ! command -v "jq" &>/dev/null; then
-            log "$RED" "jq necessario para modo non-interactive!"
+            log "$RED" "jq necessário para modo non-interactive!"
             log "$YELLOW" "Instale com: pacman -S jq"
             exit 1
         fi
@@ -149,22 +148,20 @@ detect_hardware() {
 validate_config_file() {
     if [[ "$NON_INTERACTIVE" == "true" ]]; then
         if [[ ! -f "$CONFIG_FILE" ]]; then
-            log "$RED" "Arquivo de configuracao nao encontrado: $CONFIG_FILE"
+            log "$RED" "Arquivo de configuração não encontrado: $CONFIG_FILE"
             exit 1
         fi
         
-        # Validar JSON
         if ! jq empty "$CONFIG_FILE" 2>/dev/null; then
-            log "$RED" "Arquivo JSON invalido: $CONFIG_FILE"
+            log "$RED" "Arquivo JSON inválido: $CONFIG_FILE"
             exit 1
         fi
         
-        # Validar campos obrigatorios
-        local required_fields=("disco_principal" "hostname" "username" "user_password" "root_password")
+        local required_fields=("disco_principal" "hostname" "username" "user_password" "root_password" "luks_root_password")
         for field in "${required_fields[@]}"; do
             local value=$(jq -r ".$field // \"\"" "$CONFIG_FILE")
             if [[ -z "$value" ]] || [[ "$value" == "null" ]]; then
-                log "$RED" "Campo obrigatorio ausente ou vazio: $field"
+                log "$RED" "Campo obrigatório ausente ou vazio: $field"
                 exit 1
             fi
         done
@@ -177,23 +174,21 @@ select_disks() {
         DISCO_PRINCIPAL=$(jq -r '.disco_principal' "$CONFIG_FILE")
         DISCO_AUXILIAR=$(jq -r '.disco_auxiliar // ""' "$CONFIG_FILE")
         
-        # Validar que os discos existem (exceto em modo simulate)
         if [[ "$SIMULATE" != "true" ]]; then
             if [[ ! -b "$DISCO_PRINCIPAL" ]]; then
-                log "$RED" "Disco principal nao existe: $DISCO_PRINCIPAL"
+                log "$RED" "Disco principal não existe: $DISCO_PRINCIPAL"
                 exit 1
             fi
             
             if [[ -n "$DISCO_AUXILIAR" ]] && [[ "$DISCO_AUXILIAR" != "null" ]] && [[ ! -b "$DISCO_AUXILIAR" ]]; then
-                log "$RED" "Disco auxiliar nao existe: $DISCO_AUXILIAR"
+                log "$RED" "Disco auxiliar não existe: $DISCO_AUXILIAR"
                 exit 1
             fi
         fi
         
-        # Limpar valor null do JSON
         [[ "$DISCO_AUXILIAR" == "null" ]] && DISCO_AUXILIAR=""
     else
-        echo -e "${YELLOW}Discos disponiveis:${NC}"
+        echo -e "${YELLOW}Discos disponíveis:${NC}"
         local i=1
         for disk in "${DISKS[@]}"; do
             IFS='|' read -r device size <<< "$disk"
@@ -201,11 +196,11 @@ select_disks() {
             ((i++))
         done
         
-        echo -e "${YELLOW}Numero do disco PRINCIPAL:${NC}"
+        echo -e "${YELLOW}Número do disco PRINCIPAL:${NC}"
         read -r disk_num
         
         if [[ ! "$disk_num" =~ ^[0-9]+$ ]] || [[ "$disk_num" -lt 1 ]] || [[ "$disk_num" -gt ${#DISKS[@]} ]]; then
-            log "$RED" "Numero de disco invalido!"
+            log "$RED" "Número de disco inválido!"
             exit 1
         fi
         
@@ -214,11 +209,11 @@ select_disks() {
         echo -e "${YELLOW}Disco AUXILIAR? [s/N]:${NC}"
         read -r aux
         if [[ "$aux" =~ ^[Ss]$ ]]; then
-            echo -e "${YELLOW}Numero do disco AUXILIAR:${NC}"
+            echo -e "${YELLOW}Número do disco AUXILIAR:${NC}"
             read -r disk_num
             
             if [[ ! "$disk_num" =~ ^[0-9]+$ ]] || [[ "$disk_num" -lt 1 ]] || [[ "$disk_num" -gt ${#DISKS[@]} ]]; then
-                log "$RED" "Numero de disco invalido!"
+                log "$RED" "Número de disco inválido!"
                 exit 1
             fi
             
@@ -241,29 +236,29 @@ export MEM_TOTAL="$MEM_TOTAL"
 export DISCO_PRINCIPAL="$DISCO_PRINCIPAL"
 export DISCO_AUXILIAR="$DISCO_AUXILIAR"
 CONFIG
-    log "$GREEN" "Configuracao salva em $ENV_FILE"
+    log "$GREEN" "Configuração salva em $ENV_FILE"
 }
 
 main() {
     parse_args "$@"
     setup_logging
-    log "$BLUE" "=== FASE 1: PREPARACAO ==="
+    log "$BLUE" "=== FASE 1: PREPARAÇÃO ==="
     check_requirements
     detect_hardware
     select_disks
     
     if [[ "$DRY_RUN" != "true" && "$NON_INTERACTIVE" != "true" ]]; then
-        echo -e "${RED}AVISO: OS DISCOS SELECIONADOS SERAO FORMATADOS!${NC}"
+        echo -e "${RED}AVISO: OS DISCOS SELECIONADOS SERÃO FORMATADOS!${NC}"
         echo -e "${RED}Disco principal: $DISCO_PRINCIPAL${NC}"
         [[ -n "$DISCO_AUXILIAR" ]] && echo -e "${RED}Disco auxiliar: $DISCO_AUXILIAR${NC}"
-        echo -e "${RED}TODOS OS DADOS SERAO PERDIDOS!${NC}"
+        echo -e "${RED}TODOS OS DADOS SERÃO PERDIDOS!${NC}"
         echo -e "${RED}Digite CONFIRM para continuar:${NC}"
         read -r confirm
-        [[ "$confirm" != "CONFIRM" ]] && { log "$YELLOW" "Operacao cancelada"; exit 0; }
+        [[ "$confirm" != "CONFIRM" ]] && { log "$YELLOW" "Operação cancelada"; exit 0; }
     fi
     
     save_configuration
-    log "$GREEN" "Fase 1 concluida! Proximo: ./fase2-disco-principal.sh"
+    log "$GREEN" "Fase 1 concluída! Próximo: ./fase2-disco-principal.sh"
 }
 
 main "$@"
