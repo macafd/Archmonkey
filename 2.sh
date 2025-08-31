@@ -1,5 +1,5 @@
 # ============================================================================
-# FASE 2 - DISCO PRINCIPAL (CORRIGIDA)
+# FASE 2 - DISCO PRINCIPAL
 # ============================================================================
 cat << 'EOF' > fase2-disco-principal.sh
 #!/bin/bash
@@ -32,71 +32,99 @@ log() {
 
 check_commands() {
     local cmds=("cryptsetup" "parted" "mkfs.btrfs" "mkfs.ext4" "mkfs.vfat" "btrfs" "blkid" "wipefs" "partprobe" "mkswap")
+    local missing=()
+    
     for cmd in "${cmds[@]}"; do
         if ! command -v "$cmd" &>/dev/null; then
-            log "$RED" "Comando necessário não encontrado: $cmd"
-            log "$YELLOW" "Instale com: pacman -S cryptsetup parted btrfs-progs dosfstools util-linux"
-            exit 1
+            missing+=("$cmd")
         fi
     done
     
-    # sgdisk é opcional mas útil
-    if ! command -v "sgdisk" &>/dev/null; then
-        log "$YELLOW" "sgdisk não encontrado, usando métodos alternativos"
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log "$RED" "Comandos necessarios nao encontrados: ${missing[*]}"
+        log "$YELLOW" "Instale com: pacman -S cryptsetup parted btrfs-progs dosfstools util-linux"
+        exit 1
     fi
 }
 
 get_configuration() {
     if [[ "$NON_INTERACTIVE" == "true" ]]; then
         if ! command -v jq &>/dev/null; then
-            log "$RED" "jq necessário para modo non-interactive!"
+            log "$RED" "jq necessario para modo non-interactive!"
             exit 1
         fi
         
         if [[ ! -f "$CONFIG_FILE" ]]; then
-            log "$RED" "Arquivo de configuração não encontrado: $CONFIG_FILE"
+            log "$RED" "Arquivo de configuracao nao encontrado: $CONFIG_FILE"
             exit 1
         fi
         
         SWAPSIZE_GiB=$(jq -r '.swap_gib // 8' "$CONFIG_FILE")
-        LUKS_PASSWORD=$(jq -r '.luks_root_password' "$CONFIG_FILE")
+        LUKS_PASSWORD=$(jq -r '.luks_root_password // ""' "$CONFIG_FILE")
         
         if [[ -z "$LUKS_PASSWORD" ]] || [[ "$LUKS_PASSWORD" == "null" ]]; then
-            log "$RED" "Senha LUKS não encontrada no arquivo de configuração!"
+            log "$RED" "Senha LUKS nao encontrada no arquivo de configuracao!"
             exit 1
         fi
     else
-        echo -e "${YELLOW}Tamanho do swap em GB (padrão 8):${NC}"
+        echo -e "${YELLOW}Tamanho do swap em GB (padrao 8):${NC}"
         read -r swap
         SWAPSIZE_GiB="${swap:-8}"
         
         # Validar entrada
         if ! [[ "$SWAPSIZE_GiB" =~ ^[0-9]+$ ]]; then
-            log "$RED" "Tamanho de swap inválido!"
+            log "$RED" "Tamanho de swap invalido!"
             exit 1
         fi
         
-        echo -e "${YELLOW}Senha para criptografia LUKS:${NC}"
-        read -rs LUKS_PASSWORD
-        echo
-        echo -e "${YELLOW}Confirme a senha:${NC}"
-        read -rs LUKS_PASSWORD_CONFIRM
-        echo
-        
-        [[ "$LUKS_PASSWORD" != "$LUKS_PASSWORD_CONFIRM" ]] && { log "$RED" "Senhas não coincidem!"; exit 1; }
-        
-        if [[ ${#LUKS_PASSWORD} -lt 8 ]]; then
-            log "$RED" "Senha muito curta! Use pelo menos 8 caracteres."
-            exit 1
-        fi
+        while true; do
+            echo -e "${YELLOW}Senha para criptografia LUKS:${NC}"
+            read -rs LUKS_PASSWORD
+            echo
+            echo -e "${YELLOW}Confirme a senha:${NC}"
+            read -rs LUKS_PASSWORD_CONFIRM
+            echo
+            
+            if [[ "$LUKS_PASSWORD" != "$LUKS_PASSWORD_CONFIRM" ]]; then
+                echo -e "${RED}Senhas nao coincidem!${NC}"
+                continue
+            fi
+            
+            if [[ ${#LUKS_PASSWORD} -lt 8 ]]; then
+                echo -e "${RED}Senha muito curta! Use pelo menos 8 caracteres.${NC}"
+                continue
+            fi
+            
+            break
+        done
     fi
 }
 
 check_disk_mounted() {
     if mount | grep -q "$DISCO_PRINCIPAL"; then
-        log "$RED" "Disco $DISCO_PRINCIPAL está montado! Desmonte primeiro."
+        log "$RED" "Disco $DISCO_PRINCIPAL esta montado! Desmonte primeiro."
         exit 1
     fi
+}
+
+secure_wipe() {
+    local device="$1"
+    log "$YELLOW" "Limpando disco de forma segura..."
+    
+    # Tentar blkdiscard primeiro (para SSDs)
+    if command -v blkdiscard &>/dev/null; then
+        if blkdiscard -f "$device" 2>/dev/null; then
+            log "$GREEN" "Secure erase via TRIM concluido"
+            return
+        fi
+    fi
+    
+    # Fallback para wipefs
+    wipefs -af "$device" 2>/dev/null || true
+    
+    # Zerar primeiros e ultimos setores
+    dd if=/dev/zero of="$device" bs=512 count=2048 2>/dev/null || true
+    dd if=/dev/zero of="$device" bs=512 count=2048 seek=$(( $(blockdev --getsz "$device") - 2048 )) 2>/dev/null || true
 }
 
 partition_disk() {
@@ -105,23 +133,13 @@ partition_disk() {
     [[ "$DRY_RUN" == "true" ]] && { log "$YELLOW" "DRY-RUN: Pulando particionamento"; return; }
     
     check_disk_mounted
-    
-    # Limpar disco com segurança
-    log "$YELLOW" "Limpando disco..."
-    wipefs -af "$DISCO_PRINCIPAL" 2>/dev/null || true
-    
-    # Usar sgdisk se disponível, senão usar dd
-    if command -v sgdisk &>/dev/null; then
-        sgdisk -Z "$DISCO_PRINCIPAL" 2>/dev/null || true
-    else
-        dd if=/dev/zero of="$DISCO_PRINCIPAL" bs=512 count=2048 2>/dev/null || true
-    fi
+    secure_wipe "$DISCO_PRINCIPAL"
     
     partprobe "$DISCO_PRINCIPAL" 2>/dev/null || true
     sleep 1
     
     if [[ "$BOOT_MODE" == "UEFI" ]]; then
-        log "$BLUE" "Criando tabela de partições GPT (UEFI)..."
+        log "$BLUE" "Criando tabela de particoes GPT (UEFI)..."
         parted -s "$DISCO_PRINCIPAL" \
             mklabel gpt \
             mkpart ESP fat32 1MiB 513MiB \
@@ -130,7 +148,7 @@ partition_disk() {
             mkpart SWAP linux-swap 1537MiB $((1537 + SWAPSIZE_GiB * 1024))MiB \
             mkpart ROOT $((1537 + SWAPSIZE_GiB * 1024))MiB 100%
     else
-        log "$BLUE" "Criando tabela de partições MBR (BIOS)..."
+        log "$BLUE" "Criando tabela de particoes MBR (BIOS)..."
         parted -s "$DISCO_PRINCIPAL" \
             mklabel msdos \
             mkpart primary ext4 1MiB 1025MiB \
@@ -141,8 +159,9 @@ partition_disk() {
     
     sleep 2
     partprobe "$DISCO_PRINCIPAL"
+    sleep 1
     
-    # Detectar partições corretamente
+    # Detectar particoes corretamente
     if [[ "$DISCO_PRINCIPAL" =~ nvme|mmcblk|loop ]]; then
         PART_PREFIX="${DISCO_PRINCIPAL}p"
     else
@@ -161,15 +180,20 @@ partition_disk() {
         ROOT_PART="${PART_PREFIX}3"
     fi
     
-    # Verificar se as partições foram criadas
+    # Verificar se as particoes foram criadas
     for part in $BOOT_PART $SWAP_PART $ROOT_PART; do
         if [[ ! -b "$part" ]]; then
-            log "$RED" "Erro: Partição $part não foi criada!"
+            log "$RED" "Erro: Particao $part nao foi criada!"
             exit 1
         fi
     done
     
-    log "$GREEN" "Partições criadas com sucesso"
+    if [[ "$BOOT_MODE" == "UEFI" ]] && [[ ! -b "$ESP_PART" ]]; then
+        log "$RED" "Erro: Particao ESP $ESP_PART nao foi criada!"
+        exit 1
+    fi
+    
+    log "$GREEN" "Particoes criadas com sucesso"
 }
 
 create_luks() {
@@ -177,7 +201,7 @@ create_luks() {
     
     [[ "$DRY_RUN" == "true" ]] && { log "$YELLOW" "DRY-RUN: Pulando LUKS"; return; }
     
-    # Ajustar memória PBKDF baseado na RAM disponível
+    # Ajustar memoria PBKDF baseado na RAM disponivel
     local mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
     local pbkdf_memory=524288
     
@@ -207,13 +231,13 @@ create_luks() {
         exit 1
     fi
     
-    log "$GREEN" "LUKS criado e aberto com sucesso"
+    log "$GREEN" "LUKS criado e aberto com sucesso (UUID: $ROOT_UUID)"
 }
 
 create_filesystems() {
     log "$BLUE" "Criando sistemas de arquivos..."
     
-    [[ "$DRY_RUN" == "true" ]] && { log "$YELLOW" "DRY-RUN: Pulando formatação"; return; }
+    [[ "$DRY_RUN" == "true" ]] && { log "$YELLOW" "DRY-RUN: Pulando formatacao"; return; }
     
     # ESP (apenas UEFI)
     if [[ "$BOOT_MODE" == "UEFI" ]]; then
@@ -229,12 +253,14 @@ create_filesystems() {
     log "$BLUE" "Formatando swap..."
     mkswap -L SWAP "$SWAP_PART" || { log "$RED" "Erro ao formatar swap!"; exit 1; }
     
-    # Obter UUID do swap APÓS criar o filesystem
+    # Obter UUID do swap APOS criar o filesystem
     SWAP_UUID=$(blkid -s UUID -o value "$SWAP_PART")
     
     if [[ -z "$SWAP_UUID" ]]; then
-        log "$YELLOW" "Aviso: Não foi possível obter UUID do swap"
+        log "$YELLOW" "Aviso: Nao foi possivel obter UUID do swap"
         SWAP_UUID="PENDING"
+    else
+        log "$GREEN" "Swap UUID: $SWAP_UUID"
     fi
     
     # Root (Btrfs)
@@ -247,12 +273,13 @@ create_filesystems() {
     log "$BLUE" "Criando subvolumes Btrfs..."
     for subvol in @ @home @snapshots @var @log @cache; do
         btrfs subvolume create /mnt/$subvol || { log "$RED" "Erro ao criar subvolume $subvol!"; exit 1; }
+        log "$GREEN" "  Subvolume criado: $subvol"
     done
     
     umount /mnt
     
     # Remontar com subvolume @
-    log "$BLUE" "Montando sistema de arquivos..."
+    log "$BLUE" "Montando sistema de arquivos final..."
     mount -o subvol=@,compress=zstd:3,noatime /dev/mapper/cryptroot /mnt || \
         { log "$RED" "Erro ao montar subvolume @!"; exit 1; }
     
@@ -280,7 +307,7 @@ create_filesystems() {
 
 update_env() {
     cat >> "$ENV_FILE" << ENV
-export ESP_PART="$ESP_PART"
+export ESP_PART="${ESP_PART:-}"
 export BOOT_PART="$BOOT_PART"
 export SWAP_PART="$SWAP_PART"
 export ROOT_PART="$ROOT_PART"
@@ -288,7 +315,7 @@ export ROOT_UUID="$ROOT_UUID"
 export SWAP_UUID="$SWAP_UUID"
 export SWAPSIZE_GiB="$SWAPSIZE_GiB"
 ENV
-    log "$GREEN" "Variáveis de ambiente atualizadas"
+    log "$GREEN" "Variaveis de ambiente atualizadas"
 }
 
 main() {
@@ -299,11 +326,11 @@ main() {
     get_configuration
     
     if [[ "$DRY_RUN" != "true" && "$NON_INTERACTIVE" != "true" ]]; then
-        echo -e "${RED}ATENÇÃO: SERÁ FORMATADO: $DISCO_PRINCIPAL${NC}"
-        echo -e "${RED}TODOS OS DADOS SERÃO PERDIDOS!${NC}"
+        echo -e "${RED}ATENCAO: SERA FORMATADO: $DISCO_PRINCIPAL${NC}"
+        echo -e "${RED}TODOS OS DADOS SERAO PERDIDOS!${NC}"
         echo -e "${RED}Digite CONFIRM para continuar:${NC}"
         read -r confirm
-        [[ "$confirm" != "CONFIRM" ]] && { log "$YELLOW" "Operação cancelada"; exit 0; }
+        [[ "$confirm" != "CONFIRM" ]] && { log "$YELLOW" "Operacao cancelada"; exit 0; }
     fi
     
     partition_disk
@@ -311,7 +338,7 @@ main() {
     create_filesystems
     update_env
     
-    log "$GREEN" "Fase 2 concluída! Próximo: ./fase3-disco-auxiliar.sh (opcional) ou ./fase4-base-system.sh"
+    log "$GREEN" "Fase 2 concluida! Proximo: ./fase3-disco-auxiliar.sh (opcional) ou ./fase4-base-system.sh"
 }
 
 main
