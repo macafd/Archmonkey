@@ -1,7 +1,3 @@
-#!/bin/bash
-# Continuação das correções - Fases 5-7
-# Este arquivo complementa o anterior com as fases restantes corrigidas
-
 # ============================================================================
 # FASE 5 - CONFIG CHROOT (CORRIGIDA E COMPLETA)
 # ============================================================================
