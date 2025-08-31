@@ -1,9 +1,9 @@
 # ============================================================================
-# FASE 4 - SISTEMA BASE (CORRIGIDA)
+# FASE 4 - SISTEMA BASE
 # ============================================================================
 cat << 'EOF' > fase4-base-system.sh
 #!/bin/bash
-# fase4-base-system.sh - Instalação do sistema base
+# fase4-base-system.sh - Instalacao do sistema base
 set -euo pipefail
 
 RED='\033[0;31m'
@@ -34,18 +34,18 @@ check_mounts() {
     log "$BLUE" "Verificando pontos de montagem..."
     
     if ! mountpoint -q /mnt; then
-        log "$RED" "Erro: /mnt não está montado!"
+        log "$RED" "Erro: /mnt nao esta montado!"
         log "$YELLOW" "Execute fase2 primeiro ou monte manualmente"
         exit 1
     fi
     
     if ! mountpoint -q /mnt/boot; then
-        log "$RED" "Erro: /mnt/boot não está montado!"
+        log "$RED" "Erro: /mnt/boot nao esta montado!"
         exit 1
     fi
     
     if [[ "$BOOT_MODE" == "UEFI" ]] && ! mountpoint -q /mnt/boot/efi; then
-        log "$RED" "Erro: /mnt/boot/efi não está montado!"
+        log "$RED" "Erro: /mnt/boot/efi nao esta montado!"
         exit 1
     fi
 }
@@ -70,22 +70,22 @@ main() {
     PACKAGES="$PACKAGES man-db man-pages texinfo"
     PACKAGES="$PACKAGES hdparm smartmontools"
     PACKAGES="$PACKAGES openssh rsync"
-    PACKAGES="$PACKAGES jq gnupg"  # Adicionar gnupg para fase6
+    PACKAGES="$PACKAGES jq gnupg tar"
     
     log "$BLUE" "Instalando sistema base..."
     if ! pacstrap /mnt $PACKAGES; then
         log "$RED" "Erro ao instalar sistema base!"
-        log "$YELLOW" "Verifique sua conexão com internet e espelhos"
+        log "$YELLOW" "Verifique sua conexao com internet e espelhos"
         exit 1
     fi
     
     log "$BLUE" "Gerando fstab..."
     genfstab -U /mnt >> /mnt/etc/fstab
     
-    # Copiar scripts e configuração
+    # Copiar scripts e configuracao
     cp "$ENV_FILE" /mnt/tmp/
     
-    # Copiar arquivo de configuração se existir
+    # Copiar arquivo de configuracao se existir
     if [[ -n "$CONFIG_FILE" ]] && [[ -f "$CONFIG_FILE" ]]; then
         cp "$CONFIG_FILE" /mnt/tmp/config.json
         # Atualizar ENV_FILE no chroot para apontar para o novo local
@@ -98,15 +98,15 @@ main() {
             cp "$script" /mnt/root/
             chmod +x /mnt/root/"$script"
         else
-            log "$YELLOW" "Aviso: $script não encontrado"
+            log "$YELLOW" "Aviso: $script nao encontrado"
         fi
     done
     
     log "$GREEN" "Sistema base instalado!"
-    log "$YELLOW" "Próximos passos:"
+    log "$YELLOW" "Proximos passos:"
     log "$YELLOW" "1. Entre no chroot: arch-chroot /mnt"
     log "$YELLOW" "2. Execute: cd /root && ./fase5-config-chroot.sh"
 }
 
 main
-EOF
+EOF 
