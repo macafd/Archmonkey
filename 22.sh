@@ -1,5 +1,6 @@
 #!/bin/bash
 # fase2-disco-principal.sh - Particionamento e criptografia do disco principal
+# VERSÃO CORRIGIDA - Resolve problemas com volumes LUKS e device mapper
 set -euo pipefail
 
 RED='\033[0;31m'
@@ -130,20 +131,66 @@ get_configuration() {
     fi
 }
 
-# NOVA FUNÇÃO: Limpar completamente o disco e suas dependências
+# FUNÇÃO CORRIGIDA: Verificar e fechar volume LUKS existente
+check_and_close_luks() {
+    local luks_name="$1"
+    
+    if [[ -b "/dev/mapper/$luks_name" ]]; then
+        log "$YELLOW" "Volume LUKS '$luks_name' ja existe. Fechando..."
+        
+        # Tentar desmontar primeiro
+        if mount | grep -q "/dev/mapper/$luks_name"; then
+            log "$YELLOW" "  Desmontando volumes montados em /dev/mapper/$luks_name..."
+            umount -R /mnt 2>/dev/null || true
+            sleep 1
+        fi
+        
+        # Fechar o volume LUKS
+        if cryptsetup close "$luks_name" 2>/dev/null; then
+            log "$GREEN" "  Volume LUKS '$luks_name' fechado com sucesso"
+        else
+            # Se falhou, tentar forçar
+            log "$YELLOW" "  Tentando fechar forcadamente..."
+            dmsetup remove -f "$luks_name" 2>/dev/null || true
+            sleep 1
+            
+            # Verificar se foi fechado
+            if [[ -b "/dev/mapper/$luks_name" ]]; then
+                log "$RED" "  Erro: Nao foi possivel fechar o volume LUKS '$luks_name'"
+                log "$YELLOW" "  Tente executar manualmente:"
+                log "$YELLOW" "    umount -R /mnt"
+                log "$YELLOW" "    cryptsetup close $luks_name"
+                log "$YELLOW" "    dmsetup remove $luks_name"
+                exit 1
+            fi
+        fi
+    fi
+}
+
+# FUNÇÃO MELHORADA: Limpar completamente o disco e suas dependências
 cleanup_disk() {
     local device="$1"
     log "$YELLOW" "Limpando completamente o disco $device..."
     
-    # 1. Desmontar todas as partições do disco
-    log "$BLUE" "Desmontando particoes..."
-    for mount_point in $(mount | grep "^${device}" | awk '{print $1}'); do
+    # 1. Desmontar /mnt e seus submounts primeiro
+    if mount | grep -q "^.*on /mnt"; then
+        log "$BLUE" "Desmontando /mnt e submounts..."
+        umount -R /mnt 2>/dev/null || true
+        sleep 1
+    fi
+    
+    # 2. Fechar volume cryptroot se existir
+    check_and_close_luks "cryptroot"
+    
+    # 3. Desmontar todas as partições do disco
+    log "$BLUE" "Desmontando particoes do disco..."
+    for mount_point in $(mount | grep "^${device}" | awk '{print $3}'); do
         log "$YELLOW" "  Desmontando $mount_point..."
         umount -f "$mount_point" 2>/dev/null || true
     done
     
-    # 2. Fechar volumes LUKS
-    log "$BLUE" "Fechando volumes LUKS..."
+    # 4. Fechar todos os volumes LUKS relacionados ao disco
+    log "$BLUE" "Fechando volumes LUKS relacionados..."
     for luks_dev in $(dmsetup ls --target crypt | awk '{print $1}'); do
         if cryptsetup status "$luks_dev" 2>/dev/null | grep -q "${device}"; then
             log "$YELLOW" "  Fechando volume LUKS: $luks_dev..."
@@ -151,41 +198,52 @@ cleanup_disk() {
         fi
     done
     
-    # 3. Desativar swap se estiver no disco
+    # 5. Desativar swap se estiver no disco
     log "$BLUE" "Desativando swap..."
     for swap_part in $(swapon -s | grep "^${device}" | awk '{print $1}'); do
         log "$YELLOW" "  Desativando swap em $swap_part..."
         swapoff "$swap_part" 2>/dev/null || true
     done
     
-    # 4. Remover LVM se existir
+    # 6. Remover LVM se existir
     log "$BLUE" "Removendo volumes LVM..."
     if command -v vgchange &>/dev/null; then
         vgchange -an 2>/dev/null || true
     fi
     
-    # 5. Limpar device mapper
+    # 7. Limpar device mapper forçadamente
     log "$BLUE" "Limpando device mapper..."
-    dmsetup remove_all --force 2>/dev/null || true
+    # Lista todos os devices e remove apenas os relacionados
+    for dm_dev in $(dmsetup ls --target crypt | awk '{print $1}'); do
+        dmsetup remove -f "$dm_dev" 2>/dev/null || true
+    done
     
-    # 6. Terminar processos usando o disco
+    # 8. Terminar processos usando o disco
     log "$BLUE" "Terminando processos usando o disco..."
     if command -v fuser &>/dev/null; then
         fuser -km "$device" 2>/dev/null || true
     fi
     
-    # 7. Sincronizar e aguardar
+    # 9. Sincronizar e aguardar
     sync
     sleep 2
     
-    # 8. Forçar kernel a reler tabela de partições vazia
+    # 10. Forçar kernel a reler tabela de partições vazia
     log "$BLUE" "Limpando tabela de particoes..."
     dd if=/dev/zero of="$device" bs=512 count=34 2>/dev/null || true
     dd if=/dev/zero of="$device" bs=512 count=34 seek=$(( $(blockdev --getsz "$device") - 34 )) 2>/dev/null || true
     
-    # 9. Informar kernel sobre mudanças
+    # 11. Informar kernel sobre mudanças
     partprobe "$device" 2>/dev/null || true
     sleep 1
+    
+    # 12. Verificação final
+    if [[ -b "/dev/mapper/cryptroot" ]]; then
+        log "$RED" "AVISO: cryptroot ainda existe apos limpeza!"
+        log "$YELLOW" "Tentando remocao forcada final..."
+        dmsetup remove -f cryptroot 2>/dev/null || true
+        sleep 1
+    fi
     
     log "$GREEN" "Limpeza do disco concluida"
 }
@@ -202,7 +260,7 @@ secure_wipe() {
     log "$YELLOW" "Limpando disco de forma segura..."
     
     # Tentar blkdiscard primeiro (para SSDs)
-    if command -v blkdiscard &>/dev/null; then
+    if command -v blkdiscard &>/dev/null && [[ "$DRY_RUN" != "true" ]]; then
         if blkdiscard -f "$device" 2>/dev/null; then
             log "$GREEN" "Secure erase via TRIM concluido"
             return
@@ -213,8 +271,8 @@ secure_wipe() {
     wipefs -af "$device" 2>/dev/null || true
     
     # Zerar primeiros e ultimos setores
-    dd if=/dev/zero of="$device" bs=512 count=2048 2>/dev/null || true
-    dd if=/dev/zero of="$device" bs=512 count=2048 seek=$(( $(blockdev --getsz "$device") - 2048 )) 2>/dev/null || true
+    dd if=/dev/zero of="$device" bs=512 count=2048 status=none 2>/dev/null || true
+    dd if=/dev/zero of="$device" bs=512 count=2048 seek=$(( $(blockdev --getsz "$device") - 2048 )) status=none 2>/dev/null || true
 }
 
 partition_disk() {
@@ -390,6 +448,7 @@ partition_disk() {
     lsblk "$DISCO_PRINCIPAL"
 }
 
+# FUNÇÃO CORRIGIDA: Criar volume LUKS com verificações adicionais
 create_luks() {
     log "$BLUE" "Criando volume LUKS no root..."
     
@@ -399,6 +458,16 @@ create_luks() {
     if [[ ! -b "$ROOT_PART" ]]; then
         log "$RED" "Erro: Particao $ROOT_PART nao existe!"
         exit 1
+    fi
+    
+    # IMPORTANTE: Verificar e fechar volume LUKS existente
+    check_and_close_luks "cryptroot"
+    
+    # Verificar se a partição já tem LUKS
+    if cryptsetup isLuks "$ROOT_PART" 2>/dev/null; then
+        log "$YELLOW" "Particao $ROOT_PART ja tem LUKS. Limpando..."
+        wipefs -a "$ROOT_PART" 2>/dev/null || true
+        sleep 1
     fi
     
     # Ajustar memoria PBKDF baseado na RAM disponivel
@@ -419,9 +488,23 @@ create_luks() {
         --batch-mode \
         "$ROOT_PART" - || { log "$RED" "Erro ao criar LUKS!"; exit 1; }
     
+    # Aguardar um momento antes de abrir
+    sleep 1
+    
     log "$BLUE" "Abrindo volume LUKS..."
+    
+    # Verificar novamente se cryptroot não existe antes de abrir
+    if [[ -b /dev/mapper/cryptroot ]]; then
+        log "$YELLOW" "cryptroot ainda existe. Removendo..."
+        dmsetup remove -f cryptroot 2>/dev/null || true
+        sleep 1
+    fi
+    
     echo -n "$LUKS_PASSWORD" | cryptsetup open "$ROOT_PART" cryptroot - || \
         { log "$RED" "Erro ao abrir volume LUKS!"; exit 1; }
+    
+    # Aguardar o dispositivo aparecer
+    sleep 1
     
     # Verificar se o volume foi aberto
     if [[ ! -b /dev/mapper/cryptroot ]]; then
@@ -440,10 +523,18 @@ create_luks() {
     log "$GREEN" "LUKS criado e aberto com sucesso (UUID: $ROOT_UUID)"
 }
 
+# FUNÇÃO CORRIGIDA: Criar sistemas de arquivos com verificações adicionais
 create_filesystems() {
     log "$BLUE" "Criando sistemas de arquivos..."
     
     [[ "$DRY_RUN" == "true" ]] && { log "$YELLOW" "DRY-RUN: Pulando formatacao"; return; }
+    
+    # Desmontar qualquer coisa em /mnt antes de começar
+    if mount | grep -q " /mnt"; then
+        log "$YELLOW" "Desmontando /mnt existente..."
+        umount -R /mnt 2>/dev/null || true
+        sleep 1
+    fi
     
     # ESP (apenas UEFI)
     if [[ "$BOOT_MODE" == "UEFI" ]]; then
@@ -462,18 +553,36 @@ create_filesystems() {
     wipefs -a "$SWAP_PART" 2>/dev/null || true
     mkswap -L SWAP "$SWAP_PART" || { log "$RED" "Erro ao formatar swap!"; exit 1; }
     
+    # Aguardar filesystem ser criado
+    sleep 1
+    sync
+    
     # Obter UUID do swap APOS criar o filesystem
     SWAP_UUID=$(blkid -s UUID -o value "$SWAP_PART")
     
     if [[ -z "$SWAP_UUID" ]]; then
-        log "$YELLOW" "Aviso: Nao foi possivel obter UUID do swap"
-        SWAP_UUID="PENDING"
+        log "$YELLOW" "Aviso: Tentando obter UUID do swap novamente..."
+        sleep 2
+        partprobe "$SWAP_PART" 2>/dev/null || true
+        SWAP_UUID=$(blkid -s UUID -o value "$SWAP_PART")
+        
+        if [[ -z "$SWAP_UUID" ]]; then
+            log "$YELLOW" "Aviso: Nao foi possivel obter UUID do swap"
+            SWAP_UUID="PENDING"
+        fi
     else
         log "$GREEN" "Swap UUID: $SWAP_UUID"
     fi
     
     # Root (Btrfs)
     log "$BLUE" "Formatando root com Btrfs..."
+    
+    # Verificar se cryptroot existe
+    if [[ ! -b /dev/mapper/cryptroot ]]; then
+        log "$RED" "Erro: /dev/mapper/cryptroot nao existe!"
+        exit 1
+    fi
+    
     wipefs -a /dev/mapper/cryptroot 2>/dev/null || true
     mkfs.btrfs -L ROOT /dev/mapper/cryptroot || { log "$RED" "Erro ao formatar root!"; exit 1; }
     
@@ -487,6 +596,7 @@ create_filesystems() {
     done
     
     umount /mnt
+    sleep 1
     
     # Remontar com subvolume @
     log "$BLUE" "Montando sistema de arquivos final..."
@@ -513,9 +623,28 @@ create_filesystems() {
     fi
     
     log "$GREEN" "Sistemas de arquivos criados e montados com sucesso"
+    
+    # Verificar montagens
+    log "$BLUE" "Verificando montagens:"
+    mount | grep "/mnt" | while read -r line; do
+        log "$GREEN" "  $line"
+    done
 }
 
 update_env() {
+    # Limpar variáveis antigas do arquivo se existirem
+    if grep -q "^export ESP_PART=" "$ENV_FILE" 2>/dev/null; then
+        log "$YELLOW" "Limpando variaveis antigas do arquivo de ambiente..."
+        sed -i '/^export ESP_PART=/d' "$ENV_FILE"
+        sed -i '/^export BOOT_PART=/d' "$ENV_FILE"
+        sed -i '/^export SWAP_PART=/d' "$ENV_FILE"
+        sed -i '/^export ROOT_PART=/d' "$ENV_FILE"
+        sed -i '/^export ROOT_UUID=/d' "$ENV_FILE"
+        sed -i '/^export SWAP_UUID=/d' "$ENV_FILE"
+        sed -i '/^export SWAPSIZE_GiB=/d' "$ENV_FILE"
+    fi
+    
+    # Adicionar novas variáveis
     cat >> "$ENV_FILE" << ENV
 export ESP_PART="${ESP_PART:-}"
 export BOOT_PART="$BOOT_PART"
@@ -528,12 +657,58 @@ ENV
     log "$GREEN" "Variaveis de ambiente atualizadas"
 }
 
+# NOVA FUNÇÃO: Verificar estado antes de executar
+pre_flight_check() {
+    log "$BLUE" "Executando verificacoes pre-voo..."
+    
+    # Verificar se já existe um sistema montado em /mnt
+    if mount | grep -q " /mnt "; then
+        log "$YELLOW" "Sistema ja montado em /mnt detectado"
+        echo -e "${YELLOW}Deseja desmontar e continuar? (s/n):${NC}"
+        
+        if [[ "$NON_INTERACTIVE" != "true" ]]; then
+            read -r resposta
+            if [[ "$resposta" != "s" ]]; then
+                log "$YELLOW" "Operacao cancelada pelo usuario"
+                exit 0
+            fi
+        fi
+        
+        log "$YELLOW" "Desmontando sistema existente..."
+        umount -R /mnt 2>/dev/null || true
+        sleep 1
+    fi
+    
+    # Verificar se cryptroot já existe
+    if [[ -b /dev/mapper/cryptroot ]]; then
+        log "$YELLOW" "Volume cryptroot detectado"
+        check_and_close_luks "cryptroot"
+    fi
+    
+    # Verificar espaço em disco
+    local disk_size=$(blockdev --getsize64 "$DISCO_PRINCIPAL" 2>/dev/null || echo 0)
+    local disk_size_gb=$((disk_size / 1024 / 1024 / 1024))
+    local required_gb=$((10 + SWAPSIZE_GiB))  # Mínimo 10GB + swap
+    
+    if [[ $disk_size_gb -lt $required_gb ]]; then
+        log "$RED" "Espaco insuficiente no disco!"
+        log "$RED" "Disponivel: ${disk_size_gb}GB, Necessario: ${required_gb}GB"
+        exit 1
+    fi
+    
+    log "$GREEN" "Verificacoes pre-voo concluidas"
+}
+
 main() {
     setup_logging
     log "$BLUE" "=== FASE 2: DISCO PRINCIPAL ==="
+    log "$BLUE" "Disco alvo: $DISCO_PRINCIPAL"
     
     check_commands
     get_configuration
+    
+    # Executar verificações antes de continuar
+    pre_flight_check
     
     if [[ "$DRY_RUN" != "true" && "$NON_INTERACTIVE" != "true" ]]; then
         echo -e "${RED}ATENCAO: SERA FORMATADO: $DISCO_PRINCIPAL${NC}"
@@ -548,7 +723,12 @@ main() {
     create_filesystems
     update_env
     
-    log "$GREEN" "Fase 2 concluida! Proximo: ./fase3-disco-auxiliar.sh (opcional) ou ./fase4-base-system.sh"
+    log "$GREEN" "=== FASE 2 CONCLUIDA COM SUCESSO ==="
+    log "$GREEN" "Sistema de arquivos montado em /mnt"
+    log "$GREEN" "Proximo: ./fase3-disco-auxiliar.sh (opcional) ou ./fase4-base-system.sh"
 }
 
-main
+# Tratamento de erro global
+trap 'log "$RED" "Erro na linha $LINENO. Codigo de saida: $?"' ERR
+
+main "$@"
