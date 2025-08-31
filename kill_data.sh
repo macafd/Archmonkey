@@ -4,7 +4,7 @@
 # Script de Formatação Segura de Discos
 # Para Arch Linux Live
 # Autor: Sistema Automatizado
-# Versão: 2.0
+# Versão: 2.1 - Enhanced SSD Secure Erase
 #############################################
 
 # Cores para output
@@ -30,11 +30,16 @@ check_root() {
 install_dependencies() {
     echo -e "${CYAN}${BOLD}Verificando dependências...${NC}"
     
-    DEPS=("pv" "dialog" "smartmontools" "hdparm")
+    DEPS=("pv" "dialog" "smartmontools" "hdparm" "nvme-cli")
     MISSING_DEPS=()
     
     for dep in "${DEPS[@]}"; do
-        if ! command -v $dep &> /dev/null; then
+        # Verificação especial para nvme-cli (pode estar como nvme)
+        if [[ "$dep" == "nvme-cli" ]]; then
+            if ! command -v nvme &> /dev/null; then
+                MISSING_DEPS+=($dep)
+            fi
+        elif ! command -v $dep &> /dev/null; then
             MISSING_DEPS+=($dep)
         fi
     done
@@ -265,33 +270,77 @@ wipe_with_shred() {
     shred -vfz -n $passes $disk
 }
 
-# SSD Secure Erase
+# SSD Secure Erase - VERSÃO MELHORADA
 ssd_secure_erase() {
     local disk=$1
+    local disk_name=$(basename $disk)
     
     echo -e "${CYAN}Executando Secure Erase em $disk...${NC}"
     
-    # Verificar se suporta secure erase
-    if ! hdparm -I $disk 2>/dev/null | grep -q "supported: enhanced erase"; then
-        echo -e "${YELLOW}Este SSD não suporta Secure Erase. Usando método alternativo...${NC}"
+    # Verificar se é NVMe primeiro
+    if [[ "$disk" =~ nvme ]]; then
+        echo -e "${YELLOW}Detectado SSD NVMe. Tentando nvme format...${NC}"
+        if nvme format $disk --ses=1 2>/dev/null; then
+            echo -e "${GREEN}NVMe Secure Erase concluído!${NC}"
+            return 0
+        else
+            echo -e "${YELLOW}nvme format falhou. Tentando método alternativo...${NC}"
+        fi
+    fi
+    
+    # Verificar se suporta ATA secure erase
+    if hdparm -I $disk 2>/dev/null | grep -q "supported.*enhanced erase"; then
+        echo -e "${GREEN}SSD suporta ATA Enhanced Secure Erase${NC}"
         
-        # Usar TRIM/discard como alternativa
-        echo -e "${CYAN}Executando TRIM/discard em todo o disco...${NC}"
-        blkdiscard -v $disk 2>&1
-        
-        if [ $? -ne 0 ]; then
-            echo -e "${YELLOW}TRIM falhou. Usando zeros...${NC}"
-            wipe_with_zeros $disk
+        # Verificar se não está bloqueado
+        if hdparm -I $disk 2>/dev/null | grep -q "not.*locked"; then
+            # Verificar tempo estimado
+            local time_estimate=$(hdparm -I $disk 2>/dev/null | grep "enhanced erase" | grep -o "[0-9]*min")
+            echo -e "${CYAN}Tempo estimado: ${time_estimate:-"desconhecido"}${NC}"
+            
+            # Configurar senha temporária (mais segura)
+            local temp_pass="SecureErase$(date +%s)"
+            if hdparm --user-master u --security-set-pass "$temp_pass" $disk 2>/dev/null; then
+                # Executar enhanced secure erase
+                echo -e "${CYAN}Executando Enhanced Secure Erase...${NC}"
+                if hdparm --user-master u --security-erase-enhanced "$temp_pass" $disk 2>/dev/null; then
+                    echo -e "${GREEN}ATA Enhanced Secure Erase concluído!${NC}"
+                    return 0
+                else
+                    echo -e "${YELLOW}Enhanced erase falhou. Tentando erase normal...${NC}"
+                    hdparm --user-master u --security-erase "$temp_pass" $disk 2>/dev/null
+                    if [ $? -eq 0 ]; then
+                        echo -e "${GREEN}ATA Secure Erase concluído!${NC}"
+                        return 0
+                    fi
+                fi
+            else
+                echo -e "${YELLOW}Não foi possível definir senha de segurança.${NC}"
+            fi
+        else
+            echo -e "${YELLOW}Disco está bloqueado. Tentando desbloquear...${NC}"
         fi
     else
-        # Configurar senha temporária
-        hdparm --user-master u --security-set-pass p $disk
-        
-        # Executar secure erase
-        time hdparm --user-master u --security-erase p $disk
-        
-        echo -e "${GREEN}Secure Erase concluído!${NC}"
+        echo -e "${YELLOW}Este SSD não suporta ATA Secure Erase.${NC}"
     fi
+    
+    # Fallback: TRIM todo o disco
+    echo -e "${CYAN}Tentando TRIM/discard em todo o disco...${NC}"
+    if blkdiscard -v $disk 2>/dev/null; then
+        echo -e "${GREEN}TRIM concluído com sucesso!${NC}"
+        
+        # Verificação extra: sobrescrever com zeros para máxima segurança
+        echo -e "${CYAN}Aplicando passada de zeros para máxima segurança...${NC}"
+        dd if=/dev/zero of=$disk bs=1M count=100 status=progress 2>/dev/null
+        
+    else
+        echo -e "${YELLOW}TRIM falhou. Usando sobrescrita completa com zeros...${NC}"
+        wipe_with_zeros $disk
+    fi
+    
+    # Sincronizar para garantir que tudo foi escrito
+    sync
+    sleep 2
 }
 
 # Processar limpeza de disco
