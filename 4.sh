@@ -1,7 +1,6 @@
 # ============================================================================
-# FASE 4 - SISTEMA BASE
+# FASE 4 - SISTEMA BASE (CORRIGIDA)
 # ============================================================================
-echo -e "${GREEN}Criando fase4-base-system.sh...${NC}"
 cat << 'EOF' > fase4-base-system.sh
 #!/bin/bash
 # fase4-base-system.sh - Instalação do sistema base
@@ -31,11 +30,33 @@ log() {
     echo -e "${level}[$(date '+%Y-%m-%d %H:%M:%S')] $*${NC}" | tee -a "$LOG_FILE"
 }
 
+check_mounts() {
+    log "$BLUE" "Verificando pontos de montagem..."
+    
+    if ! mountpoint -q /mnt; then
+        log "$RED" "Erro: /mnt não está montado!"
+        log "$YELLOW" "Execute fase2 primeiro ou monte manualmente"
+        exit 1
+    fi
+    
+    if ! mountpoint -q /mnt/boot; then
+        log "$RED" "Erro: /mnt/boot não está montado!"
+        exit 1
+    fi
+    
+    if [[ "$BOOT_MODE" == "UEFI" ]] && ! mountpoint -q /mnt/boot/efi; then
+        log "$RED" "Erro: /mnt/boot/efi não está montado!"
+        exit 1
+    fi
+}
+
 main() {
     setup_logging
     log "$BLUE" "=== FASE 4: SISTEMA BASE ==="
     
     [[ "$DRY_RUN" == "true" ]] && { log "$YELLOW" "DRY-RUN: Nada instalado"; exit 0; }
+    
+    check_mounts
     
     # Pacotes essenciais
     PACKAGES="base linux linux-firmware linux-headers base-devel"
@@ -49,22 +70,37 @@ main() {
     PACKAGES="$PACKAGES man-db man-pages texinfo"
     PACKAGES="$PACKAGES hdparm smartmontools"
     PACKAGES="$PACKAGES openssh rsync"
-    PACKAGES="$PACKAGES jq"
+    PACKAGES="$PACKAGES jq gnupg"  # Adicionar gnupg para fase6
     
     log "$BLUE" "Instalando sistema base..."
-    pacstrap /mnt $PACKAGES
+    if ! pacstrap /mnt $PACKAGES; then
+        log "$RED" "Erro ao instalar sistema base!"
+        log "$YELLOW" "Verifique sua conexão com internet e espelhos"
+        exit 1
+    fi
     
     log "$BLUE" "Gerando fstab..."
     genfstab -U /mnt >> /mnt/etc/fstab
     
     # Copiar scripts e configuração
     cp "$ENV_FILE" /mnt/tmp/
-    cp fase5-config-chroot.sh /mnt/root/
-    cp fase6-backup-scripts.sh /mnt/root/
-    cp fase7-autodestruicao.sh /mnt/root/
-    chmod +x /mnt/root/*.sh
     
-    [[ -f "$CONFIG_FILE" ]] && cp "$CONFIG_FILE" /mnt/tmp/
+    # Copiar arquivo de configuração se existir
+    if [[ -n "$CONFIG_FILE" ]] && [[ -f "$CONFIG_FILE" ]]; then
+        cp "$CONFIG_FILE" /mnt/tmp/config.json
+        # Atualizar ENV_FILE no chroot para apontar para o novo local
+        echo "export CONFIG_FILE=\"/tmp/config.json\"" >> /mnt/tmp/arch_setup_vars.env
+    fi
+    
+    # Copiar scripts da fase 5 em diante
+    for script in fase5-config-chroot.sh fase6-backup-scripts.sh fase7-autodestruicao.sh; do
+        if [[ -f "$script" ]]; then
+            cp "$script" /mnt/root/
+            chmod +x /mnt/root/"$script"
+        else
+            log "$YELLOW" "Aviso: $script não encontrado"
+        fi
+    done
     
     log "$GREEN" "Sistema base instalado!"
     log "$YELLOW" "Próximos passos:"
@@ -74,4 +110,3 @@ main() {
 
 main
 EOF
-
