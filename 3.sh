@@ -1,9 +1,9 @@
 # ============================================================================
-# FASE 3 - DISCO AUXILIAR (CORRIGIDA)
+# FASE 3 - DISCO AUXILIAR
 # ============================================================================
 cat << 'EOF' > fase3-disco-auxiliar.sh
 #!/bin/bash
-# fase3-disco-auxiliar.sh - Configuração do disco auxiliar (opcional)
+# fase3-disco-auxiliar.sh - Configuracao do disco auxiliar (opcional)
 set -euo pipefail
 
 RED='\033[0;31m'
@@ -19,7 +19,7 @@ ENV_FILE="/tmp/arch_setup_vars.env"
 [[ ! -f "$ENV_FILE" ]] && { echo -e "${RED}Execute fase1 primeiro!${NC}"; exit 1; }
 source "$ENV_FILE"
 
-[[ -z "$DISCO_AUXILIAR" ]] && { echo -e "${YELLOW}Disco auxiliar não configurado. Pulando...${NC}"; exit 0; }
+[[ -z "$DISCO_AUXILIAR" ]] && { echo -e "${YELLOW}Disco auxiliar nao configurado. Pulando...${NC}"; exit 0; }
 
 setup_logging() {
     [[ "$SIMULATE" == "true" ]] && LOG_DIR="./logs"
@@ -34,16 +34,22 @@ log() {
 
 check_commands() {
     local cmds=("cryptsetup" "parted" "wipefs" "partprobe" "blkid")
+    local missing=()
+    
     for cmd in "${cmds[@]}"; do
         if ! command -v "$cmd" &>/dev/null; then
-            log "$RED" "Comando necessário não encontrado: $cmd"
-            exit 1
+            missing+=("$cmd")
         fi
     done
     
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log "$RED" "Comandos necessarios nao encontrados: ${missing[*]}"
+        exit 1
+    fi
+    
     if [[ "$NON_INTERACTIVE" == "true" ]]; then
         if ! command -v jq &>/dev/null; then
-            log "$RED" "jq necessário para modo non-interactive!"
+            log "$RED" "jq necessario para modo non-interactive!"
             exit 1
         fi
     fi
@@ -57,21 +63,29 @@ main() {
     
     if [[ "$NON_INTERACTIVE" == "true" ]]; then
         if [[ ! -f "$CONFIG_FILE" ]]; then
-            log "$RED" "Arquivo de configuração não encontrado: $CONFIG_FILE"
+            log "$RED" "Arquivo de configuracao nao encontrado: $CONFIG_FILE"
             exit 1
         fi
         
-        LUKS_AUX_PASSWORD=$(jq -r '.luks_aux_password' "$CONFIG_FILE")
+        LUKS_AUX_PASSWORD=$(jq -r '.luks_aux_password // ""' "$CONFIG_FILE")
         LINUX_ONLY=$(jq -r '.linux_only // false' "$CONFIG_FILE")
         
         if [[ -z "$LUKS_AUX_PASSWORD" ]] || [[ "$LUKS_AUX_PASSWORD" == "null" ]]; then
-            log "$RED" "Senha LUKS auxiliar não encontrada no arquivo de configuração!"
+            log "$RED" "Senha LUKS auxiliar nao encontrada no arquivo de configuracao!"
             exit 1
         fi
     else
         echo -e "${YELLOW}Senha LUKS para disco auxiliar:${NC}"
         read -rs LUKS_AUX_PASSWORD
         echo
+        echo -e "${YELLOW}Confirme a senha:${NC}"
+        read -rs LUKS_AUX_CONFIRM
+        echo
+        
+        if [[ "$LUKS_AUX_PASSWORD" != "$LUKS_AUX_CONFIRM" ]]; then
+            log "$RED" "Senhas nao coincidem!"
+            exit 1
+        fi
         
         echo -e "${YELLOW}Usar ext4 (Linux only) em vez de exFAT? [s/N]:${NC}"
         read -r linux_only
@@ -87,25 +101,27 @@ main() {
     [[ "$DRY_RUN" == "true" ]] && { log "$YELLOW" "DRY-RUN: Nada foi alterado"; exit 0; }
     
     # Particionar
+    log "$BLUE" "Particionando $DISCO_AUXILIAR..."
     wipefs -af "$DISCO_AUXILIAR"
     parted -s "$DISCO_AUXILIAR" mklabel gpt mkpart DATA 0% 100%
     sleep 1
     partprobe "$DISCO_AUXILIAR"
     
-    # Detectar partição corretamente
+    # Detectar particao corretamente
     if [[ "$DISCO_AUXILIAR" =~ nvme|mmcblk|loop ]]; then
         AUX_PART="${DISCO_AUXILIAR}p1"
     else
         AUX_PART="${DISCO_AUXILIAR}1"
     fi
     
-    # Verificar se partição foi criada
+    # Verificar se particao foi criada
     if [[ ! -b "$AUX_PART" ]]; then
-        log "$RED" "Erro: Partição $AUX_PART não foi criada!"
+        log "$RED" "Erro: Particao $AUX_PART nao foi criada!"
         exit 1
     fi
     
     # LUKS
+    log "$BLUE" "Criando volume LUKS em $AUX_PART..."
     echo -n "$LUKS_AUX_PASSWORD" | cryptsetup luksFormat \
         --type luks2 \
         --pbkdf argon2id \
@@ -118,19 +134,21 @@ main() {
     
     # Formatar
     if [[ "$LINUX_ONLY" == "true" ]]; then
+        log "$BLUE" "Formatando com ext4..."
         if command -v mkfs.ext4 &>/dev/null; then
             mkfs.ext4 -L DATA /dev/mapper/cryptdata
         else
-            log "$RED" "mkfs.ext4 não encontrado!"
+            log "$RED" "mkfs.ext4 nao encontrado!"
             exit 1
         fi
     else
+        log "$BLUE" "Formatando com exFAT..."
         if command -v mkfs.exfat &>/dev/null; then
             mkfs.exfat -n DATA /dev/mapper/cryptdata
         elif command -v mkexfatfs &>/dev/null; then
             mkexfatfs -n DATA /dev/mapper/cryptdata
         else
-            log "$RED" "mkfs.exfat não encontrado! Instale exfatprogs ou exfat-utils"
+            log "$RED" "mkfs.exfat nao encontrado! Instale exfatprogs ou exfat-utils"
             exit 1
         fi
     fi
@@ -142,7 +160,7 @@ main() {
     
     cryptsetup close cryptdata
     
-    log "$GREEN" "Disco auxiliar configurado! Próximo: ./fase4-base-system.sh"
+    log "$GREEN" "Disco auxiliar configurado! Proximo: ./fase4-base-system.sh"
 }
 
 main
