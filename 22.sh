@@ -1,6 +1,6 @@
 #!/bin/bash
 # fase2-disco-principal.sh - Particionamento e criptografia do disco principal
-# VERSÃO CORRIGIDA - Resolve problemas com volumes LUKS e device mapper
+# VERSÃO TOTALMENTE CORRIGIDA - Resolve problemas de montagem e ordem de criação
 set -euo pipefail
 
 RED='\033[0;31m'
@@ -131,7 +131,6 @@ get_configuration() {
     fi
 }
 
-# FUNÇÃO CORRIGIDA: Verificar e fechar volume LUKS existente
 check_and_close_luks() {
     local luks_name="$1"
     
@@ -167,7 +166,6 @@ check_and_close_luks() {
     fi
 }
 
-# FUNÇÃO MELHORADA: Limpar completamente o disco e suas dependências
 cleanup_disk() {
     local device="$1"
     log "$YELLOW" "Limpando completamente o disco $device..."
@@ -213,7 +211,6 @@ cleanup_disk() {
     
     # 7. Limpar device mapper forçadamente
     log "$BLUE" "Limpando device mapper..."
-    # Lista todos os devices e remove apenas os relacionados
     for dm_dev in $(dmsetup ls --target crypt | awk '{print $1}'); do
         dmsetup remove -f "$dm_dev" 2>/dev/null || true
     done
@@ -448,7 +445,6 @@ partition_disk() {
     lsblk "$DISCO_PRINCIPAL"
 }
 
-# FUNÇÃO CORRIGIDA: Criar volume LUKS com verificações adicionais
 create_luks() {
     log "$BLUE" "Criando volume LUKS no root..."
     
@@ -523,7 +519,7 @@ create_luks() {
     log "$GREEN" "LUKS criado e aberto com sucesso (UUID: $ROOT_UUID)"
 }
 
-# FUNÇÃO CORRIGIDA: Criar sistemas de arquivos com verificações adicionais
+# FUNÇÃO CORRIGIDA - Ordem de montagem dos subvolumes
 create_filesystems() {
     log "$BLUE" "Criando sistemas de arquivos..."
     
@@ -603,23 +599,52 @@ create_filesystems() {
     mount -o subvol=@,compress=zstd:3,noatime /dev/mapper/cryptroot /mnt || \
         { log "$RED" "Erro ao montar subvolume @!"; exit 1; }
     
-    # Criar pontos de montagem
-    mkdir -p /mnt/{boot,home,var,var/log,var/cache,.snapshots}
+    # Criar pontos de montagem ANTES de montar os subvolumes
+    log "$BLUE" "Criando pontos de montagem..."
+    mkdir -p /mnt/{boot,home,var,.snapshots}
     
-    # Montar subvolumes
-    mount -o subvol=@home,compress=zstd:3,noatime /dev/mapper/cryptroot /mnt/home
-    mount -o subvol=@var,compress=zstd:3,noatime /dev/mapper/cryptroot /mnt/var
-    mount -o subvol=@log,compress=zstd:3,noatime /dev/mapper/cryptroot /mnt/var/log
-    mount -o subvol=@cache,compress=zstd:3,noatime /dev/mapper/cryptroot /mnt/var/cache
-    mount -o subvol=@snapshots,compress=zstd:3,noatime /dev/mapper/cryptroot /mnt/.snapshots
+    # Montar subvolumes (ordem importante!)
+    log "$BLUE" "Montando subvolumes..."
     
-    # Montar boot
-    mount "$BOOT_PART" /mnt/boot
+    # 1. Montar @home
+    mount -o subvol=@home,compress=zstd:3,noatime /dev/mapper/cryptroot /mnt/home || \
+        { log "$RED" "Erro ao montar subvolume @home!"; exit 1; }
+    log "$GREEN" "  Montado: @home em /mnt/home"
     
-    # Montar ESP (apenas UEFI)
+    # 2. Montar @var
+    mount -o subvol=@var,compress=zstd:3,noatime /dev/mapper/cryptroot /mnt/var || \
+        { log "$RED" "Erro ao montar subvolume @var!"; exit 1; }
+    log "$GREEN" "  Montado: @var em /mnt/var"
+    
+    # 3. IMPORTANTE: Criar diretórios DEPOIS de montar @var
+    log "$BLUE" "Criando subdiretorios em /mnt/var..."
+    mkdir -p /mnt/var/{log,cache}
+    
+    # 4. Agora montar @log e @cache
+    mount -o subvol=@log,compress=zstd:3,noatime /dev/mapper/cryptroot /mnt/var/log || \
+        { log "$RED" "Erro ao montar subvolume @log!"; exit 1; }
+    log "$GREEN" "  Montado: @log em /mnt/var/log"
+    
+    mount -o subvol=@cache,compress=zstd:3,noatime /dev/mapper/cryptroot /mnt/var/cache || \
+        { log "$RED" "Erro ao montar subvolume @cache!"; exit 1; }
+    log "$GREEN" "  Montado: @cache em /mnt/var/cache"
+    
+    # 5. Montar @snapshots
+    mount -o subvol=@snapshots,compress=zstd:3,noatime /dev/mapper/cryptroot /mnt/.snapshots || \
+        { log "$RED" "Erro ao montar subvolume @snapshots!"; exit 1; }
+    log "$GREEN" "  Montado: @snapshots em /mnt/.snapshots"
+    
+    # 6. Montar boot
+    log "$BLUE" "Montando particao /boot..."
+    mount "$BOOT_PART" /mnt/boot || { log "$RED" "Erro ao montar /boot!"; exit 1; }
+    log "$GREEN" "  Montado: /boot"
+    
+    # 7. Montar ESP (apenas UEFI)
     if [[ "$BOOT_MODE" == "UEFI" ]]; then
+        log "$BLUE" "Montando particao ESP..."
         mkdir -p /mnt/boot/efi
-        mount "$ESP_PART" /mnt/boot/efi
+        mount "$ESP_PART" /mnt/boot/efi || { log "$RED" "Erro ao montar ESP!"; exit 1; }
+        log "$GREEN" "  Montado: ESP em /boot/efi"
     fi
     
     log "$GREEN" "Sistemas de arquivos criados e montados com sucesso"
@@ -628,6 +653,16 @@ create_filesystems() {
     log "$BLUE" "Verificando montagens:"
     mount | grep "/mnt" | while read -r line; do
         log "$GREEN" "  $line"
+    done
+    
+    # Verificar se todos os pontos críticos existem
+    log "$BLUE" "Verificando estrutura de diretorios:"
+    for dir in /mnt /mnt/boot /mnt/home /mnt/var /mnt/var/log /mnt/var/cache /mnt/.snapshots; do
+        if [[ -d "$dir" ]]; then
+            log "$GREEN" "  ✓ $dir existe"
+        else
+            log "$RED" "  ✗ $dir NAO existe!"
+        fi
     done
 }
 
@@ -657,7 +692,6 @@ ENV
     log "$GREEN" "Variaveis de ambiente atualizadas"
 }
 
-# NOVA FUNÇÃO: Verificar estado antes de executar
 pre_flight_check() {
     log "$BLUE" "Executando verificacoes pre-voo..."
     
