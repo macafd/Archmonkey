@@ -1,8 +1,7 @@
-
-# ============================================================================
-# FASE 7 - AUTODESTRUIÇÃO 
-# ============================================================================
 #!/bin/bash
+# fase7-autodestruicao.sh - Configuração de autodestruição (CORRIGIDO)
+# EXECUTE DENTRO DO CHROOT
+
 set -euo pipefail
 
 # Cores
@@ -56,7 +55,7 @@ check_commands() {
 create_selfdestruct_script() {
     log "$BLUE" "Criando script de autodestruição"
     
-    cat > "$SELFDESTRUCT_SCRIPT" << 'EOF'
+    cat > "$SELFDESTRUCT_SCRIPT" << 'SELFDESTRUCT_EOF'
 #!/bin/bash
 # selfdestruct-now.sh - Autodestruição de emergência
 # AVISO: ISTO DESTRUIRÁ PERMANENTEMENTE TODOS OS DADOS!
@@ -140,12 +139,12 @@ destroy_data() {
     
     # Verificar se suporta TRIM/discard
     local use_discard=false
+    local device_base=$(basename "$device")
     
     # Verificar suporte a discard
     if command -v blkdiscard &>/dev/null; then
-        # Tentar verificar capacidades do dispositivo
-        if [[ -f "/sys/block/$(basename $device)/queue/discard_max_bytes" ]]; then
-            local discard_max=$(cat "/sys/block/$(basename $device)/queue/discard_max_bytes" 2>/dev/null || echo "0")
+        if [[ -f "/sys/block/${device_base}/queue/discard_max_bytes" ]]; then
+            local discard_max=$(cat "/sys/block/${device_base}/queue/discard_max_bytes" 2>/dev/null || echo "0")
             if [[ "$discard_max" != "0" ]]; then
                 use_discard=true
             fi
@@ -280,7 +279,7 @@ else
         log "${RED}Sistema destruído. Desligue manualmente.${NC}"
     fi
 fi
-EOF
+SELFDESTRUCT_EOF
     
     chmod +x "$SELFDESTRUCT_SCRIPT"
     log "$GREEN" "Script de autodestruição criado: $SELFDESTRUCT_SCRIPT"
@@ -292,12 +291,12 @@ create_safe_alias() {
     
     # Adicionar ao bashrc do root se não existir
     if ! grep -q "alias panic=" /root/.bashrc 2>/dev/null; then
-        cat >> /root/.bashrc << 'EOF'
+        cat >> /root/.bashrc << 'ALIAS_EOF'
 
 # Aliases de autodestruição com confirmação
 alias panic='echo "Use: selfdestruct-now.sh (requer confirmação)"'
 alias destroy='echo "Use: selfdestruct-now.sh (requer confirmação)"'
-EOF
+ALIAS_EOF
         log "$GREEN" "Aliases de segurança criados"
     else
         log "$YELLOW" "Aliases já existem"
@@ -309,7 +308,7 @@ create_test_script() {
     log "$BLUE" "Criando script de teste"
     
     local TEST_SCRIPT="/usr/local/bin/test-selfdestruct.sh"
-    cat > "$TEST_SCRIPT" << 'EOF'
+    cat > "$TEST_SCRIPT" << 'TEST_EOF'
 #!/bin/bash
 # test-selfdestruct.sh - Teste do sistema de autodestruição
 
@@ -321,7 +320,7 @@ echo "Teste concluído. Para executar destruição real:"
 echo "  /usr/local/bin/selfdestruct-now.sh"
 echo
 echo "AVISO: A execução real DESTRUIRÁ TODOS OS DADOS!"
-EOF
+TEST_EOF
     
     chmod +x "$TEST_SCRIPT"
     log "$GREEN" "Script de teste criado: $TEST_SCRIPT"
@@ -379,11 +378,13 @@ main() {
     
     if [[ "${NON_INTERACTIVE:-false}" == "true" ]]; then
         INSTALL_MODE="non-interactive"
-        if [[ -f "$CONFIG_FILE" ]]; then
-            local AUTODESTRUCT=$(jq -r '.autodestruct_enabled // false' "$CONFIG_FILE" 2>/dev/null || echo "false")
-            if [[ "$AUTODESTRUCT" != "true" ]]; then
-                log "$YELLOW" "Autodestruição não habilitada no config. Pulando..."
-                exit 0
+        if [[ -f "${CONFIG_FILE:-}" ]]; then
+            if command -v jq &>/dev/null; then
+                local AUTODESTRUCT=$(jq -r '.autodestruct_enabled // false' "$CONFIG_FILE" 2>/dev/null || echo "false")
+                if [[ "$AUTODESTRUCT" != "true" ]]; then
+                    log "$YELLOW" "Autodestruição não habilitada no config. Pulando..."
+                    exit 0
+                fi
             fi
         else
             log "$YELLOW" "Config file não encontrado. Usando modo interativo."
@@ -428,4 +429,3 @@ main() {
 }
 
 main "$@"
-
