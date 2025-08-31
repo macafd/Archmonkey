@@ -1,12 +1,373 @@
-# ============================================================================
-# FASE 5 - CONFIG CHROOT (CORRIGIDA)
-# ============================================================================
-cat << 'EOF' > fase5-config-chroot.sh
 #!/bin/bash
-# fase5-config-chroot.sh - Configuração do sistema dentro do chroot
-# EXECUTE ESTE SCRIPT DENTRO DO CHROOT!
+#5 ============================================================================
+# Arch Linux + XFCE4 - Script de Instalação Otimizado
+# Baseado em: https://github.com/macafd/Archmonkey
+# Versão simplificada e otimizada para desktop leve
+# ============================================================================
 
 set -euo pipefail
+
+# ============================================================================
+# CONFIGURAÇÕES GLOBAIS
+# ============================================================================
+
+# Cores para output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+# Diretórios e arquivos
+LOG_DIR="/var/log/arch-setup"
+CONFIG_FILE="/tmp/arch-install-config.json"
+ENV_FILE="/tmp/arch_setup_vars.env"
+SCRIPT_VERSION="1.0.0"
+
+# Configurações padrão
+DEFAULT_TIMEZONE="America/Sao_Paulo"
+DEFAULT_LOCALE="pt_BR.UTF-8"
+DEFAULT_KEYMAP="br-abnt2"
+DEFAULT_HOSTNAME="archlinux"
+
+# ============================================================================
+# FUNÇÕES DE UTILIDADE
+# ============================================================================
+
+# Setup logging
+setup_logging() {
+    mkdir -p "$LOG_DIR"
+    LOG_FILE="$LOG_DIR/install-$(date '+%Y%m%d-%H%M%S').log"
+    exec 1> >(tee -a "$LOG_FILE")
+    exec 2>&1
+}
+
+# Função de log
+log() {
+    local level="$1"
+    shift
+    echo -e "${level}[$(date '+%Y-%m-%d %H:%M:%S')] $*${NC}"
+}
+
+# Verificar se está rodando como root
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        log "$RED" "Este script deve ser executado como root!"
+        exit 1
+    fi
+}
+
+# Verificar modo de boot (UEFI ou BIOS)
+check_boot_mode() {
+    if [[ -d /sys/firmware/efi/efivars ]]; then
+        BOOT_MODE="UEFI"
+        log "$GREEN" "Sistema detectado: UEFI"
+    else
+        BOOT_MODE="BIOS"
+        log "$GREEN" "Sistema detectado: BIOS"
+    fi
+}
+
+# Verificar conexão com internet
+check_internet() {
+    log "$BLUE" "Verificando conexão com a internet..."
+    if ! ping -c 1 archlinux.org &>/dev/null; then
+        log "$RED" "Sem conexão com a internet!"
+        log "$YELLOW" "Configure a rede e tente novamente."
+        exit 1
+    fi
+    log "$GREEN" "Conexão com internet OK"
+}
+
+# Verificar comandos necessários
+check_commands() {
+    local required_cmds=("fdisk" "mkfs.fat" "mkfs.ext4" "mount" "pacstrap" "arch-chroot" "genfstab")
+    local missing_cmds=()
+    
+    for cmd in "${required_cmds[@]}"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            missing_cmds+=("$cmd")
+        fi
+    done
+    
+    if [[ ${#missing_cmds[@]} -gt 0 ]]; then
+        log "$RED" "Comandos faltando: ${missing_cmds[*]}"
+        exit 1
+    fi
+}
+
+# ============================================================================
+# FASE 1: PREPARAÇÃO E CONFIGURAÇÃO
+# ============================================================================
+
+print_banner() {
+    clear
+    echo -e "${CYAN}"
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║     Arch Linux + XFCE4 - Instalador Otimizado v$SCRIPT_VERSION    ║"
+    echo "║                   Desktop Leve e Rápido                   ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+}
+
+# Modo interativo ou não-interativo
+select_mode() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        log "$BLUE" "Arquivo de configuração detectado. Usando modo não-interativo."
+        NON_INTERACTIVE=true
+        load_config_file
+    else
+        log "$YELLOW" "Modo de instalação:"
+        echo "1) Interativo (com perguntas)"
+        echo "2) Não-interativo (usar arquivo de configuração)"
+        read -r -p "Escolha [1]: " mode_choice
+        mode_choice=${mode_choice:-1}
+        
+        if [[ "$mode_choice" == "2" ]]; then
+            NON_INTERACTIVE=true
+            create_sample_config
+            log "$RED" "Edite o arquivo $CONFIG_FILE e rode o script novamente."
+            exit 0
+        else
+            NON_INTERACTIVE=false
+        fi
+    fi
+}
+
+# Criar arquivo de configuração de exemplo
+create_sample_config() {
+    cat > "$CONFIG_FILE" <<EOF
+{
+    "disk": "/dev/sda",
+    "hostname": "archlinux",
+    "username": "user",
+    "user_password": "password",
+    "root_password": "rootpassword",
+    "timezone": "America/Sao_Paulo",
+    "locale": "pt_BR.UTF-8",
+    "keymap": "br-abnt2",
+    "autologin": false,
+    "swap_size": "2G",
+    "packages": {
+        "xfce4": ["xfce4", "xfce4-goodies", "xfce4-terminal", "xfce4-notifyd"],
+        "apps": ["firefox", "nano", "htop", "neofetch", "git"],
+        "multimedia": ["pulseaudio", "pavucontrol", "vlc"],
+        "system": ["networkmanager", "network-manager-applet", "gvfs", "thunar-volman"]
+    }
+}
+EOF
+}
+
+# Carregar configuração do arquivo
+load_config_file() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        log "$RED" "Arquivo de configuração não encontrado!"
+        exit 1
+    fi
+    
+    # Validar JSON
+    if ! command -v jq &>/dev/null; then
+        log "$YELLOW" "Instalando jq para processar JSON..."
+        pacman -Sy --noconfirm jq
+    fi
+    
+    # Carregar variáveis
+    DISK=$(jq -r '.disk' "$CONFIG_FILE")
+    HOSTNAME=$(jq -r '.hostname' "$CONFIG_FILE")
+    USERNAME=$(jq -r '.username' "$CONFIG_FILE")
+    USER_PASSWORD=$(jq -r '.user_password' "$CONFIG_FILE")
+    ROOT_PASSWORD=$(jq -r '.root_password' "$CONFIG_FILE")
+    TIMEZONE=$(jq -r '.timezone // "America/Sao_Paulo"' "$CONFIG_FILE")
+    LOCALE=$(jq -r '.locale // "pt_BR.UTF-8"' "$CONFIG_FILE")
+    KEYMAP=$(jq -r '.keymap // "br-abnt2"' "$CONFIG_FILE")
+    AUTOLOGIN=$(jq -r '.autologin // false' "$CONFIG_FILE")
+    SWAP_SIZE=$(jq -r '.swap_size // "2G"' "$CONFIG_FILE")
+}
+
+# ============================================================================
+# FASE 2: PARTICIONAMENTO
+# ============================================================================
+
+select_disk() {
+    if [[ "$NON_INTERACTIVE" == true ]]; then
+        if [[ ! -b "$DISK" ]]; then
+            log "$RED" "Disco $DISK não encontrado!"
+            exit 1
+        fi
+    else
+        log "$BLUE" "Discos disponíveis:"
+        lsblk -d -o NAME,SIZE,TYPE | grep disk
+        
+        echo -e "${YELLOW}Digite o disco para instalação (ex: /dev/sda):${NC}"
+        read -r DISK
+        
+        if [[ ! -b "$DISK" ]]; then
+            log "$RED" "Disco inválido!"
+            exit 1
+        fi
+        
+        log "$RED" "ATENÇÃO: Todos os dados em $DISK serão apagados!"
+        echo -e "${YELLOW}Digite 'CONFIRMAR' para continuar:${NC}"
+        read -r confirm
+        if [[ "$confirm" != "CONFIRMAR" ]]; then
+            log "$YELLOW" "Instalação cancelada."
+            exit 0
+        fi
+    fi
+}
+
+partition_disk() {
+    log "$BLUE" "Particionando disco $DISK..."
+    
+    # Limpar disco
+    wipefs -af "$DISK"
+    sgdisk -Z "$DISK"
+    
+    if [[ "$BOOT_MODE" == "UEFI" ]]; then
+        log "$CYAN" "Criando partições UEFI..."
+        parted -s "$DISK" \
+            mklabel gpt \
+            mkpart ESP fat32 1MiB 512MiB \
+            set 1 esp on \
+            mkpart primary ext4 512MiB 100%
+        
+        # Aguardar partições
+        sleep 2
+        partprobe "$DISK"
+        
+        # Identificar partições
+        if [[ "$DISK" =~ nvme ]]; then
+            EFI_PART="${DISK}p1"
+            ROOT_PART="${DISK}p2"
+        else
+            EFI_PART="${DISK}1"
+            ROOT_PART="${DISK}2"
+        fi
+    else
+        log "$CYAN" "Criando partições BIOS..."
+        parted -s "$DISK" \
+            mklabel msdos \
+            mkpart primary ext4 1MiB 100% \
+            set 1 boot on
+        
+        # Aguardar partições
+        sleep 2
+        partprobe "$DISK"
+        
+        # Identificar partições
+        if [[ "$DISK" =~ nvme ]]; then
+            ROOT_PART="${DISK}p1"
+        else
+            ROOT_PART="${DISK}1"
+        fi
+    fi
+    
+    log "$GREEN" "Particionamento concluído"
+}
+
+format_partitions() {
+    log "$BLUE" "Formatando partições..."
+    
+    # Formatar partição root
+    mkfs.ext4 -F "$ROOT_PART"
+    
+    # Formatar partição EFI se UEFI
+    if [[ "$BOOT_MODE" == "UEFI" ]]; then
+        mkfs.fat -F32 "$EFI_PART"
+    fi
+    
+    log "$GREEN" "Formatação concluída"
+}
+
+mount_partitions() {
+    log "$BLUE" "Montando partições..."
+    
+    # Montar root
+    mount "$ROOT_PART" /mnt
+    
+    # Criar e montar EFI se UEFI
+    if [[ "$BOOT_MODE" == "UEFI" ]]; then
+        mkdir -p /mnt/boot/efi
+        mount "$EFI_PART" /mnt/boot/efi
+    fi
+    
+    # Criar arquivo swap
+    if [[ -n "$SWAP_SIZE" ]] && [[ "$SWAP_SIZE" != "0" ]]; then
+        log "$CYAN" "Criando arquivo swap de $SWAP_SIZE..."
+        fallocate -l "$SWAP_SIZE" /mnt/swapfile
+        chmod 600 /mnt/swapfile
+        mkswap /mnt/swapfile
+        swapon /mnt/swapfile
+    fi
+    
+    log "$GREEN" "Montagem concluída"
+}
+
+# ============================================================================
+# FASE 3: INSTALAÇÃO DO SISTEMA BASE
+# ============================================================================
+
+install_base_system() {
+    log "$BLUE" "Instalando sistema base..."
+    
+    # Atualizar mirrorlist para Brasil
+    log "$CYAN" "Otimizando mirrors para Brasil..."
+    curl -s "https://archlinux.org/mirrorlist/?country=BR&protocol=https&use_mirror_status=on" | \
+        sed -e 's/^#Server/Server/' -e '/^#/d' > /etc/pacman.d/mirrorlist
+    
+    # Pacotes base essenciais
+    BASE_PACKAGES=(
+        base
+        base-devel
+        linux
+        linux-firmware
+        linux-headers
+        intel-ucode
+        amd-ucode
+        btrfs-progs
+        e2fsprogs
+        dosfstools
+        grub
+        efibootmgr
+        networkmanager
+        nano
+        vim
+        sudo
+        git
+        wget
+        curl
+    )
+    
+    # Instalar sistema base
+    pacstrap /mnt "${BASE_PACKAGES[@]}"
+    
+    log "$GREEN" "Sistema base instalado"
+}
+
+generate_fstab() {
+    log "$BLUE" "Gerando fstab..."
+    genfstab -U /mnt >> /mnt/etc/fstab
+    
+    # Adicionar entrada para swapfile se existir
+    if [[ -f /mnt/swapfile ]]; then
+        echo "/swapfile none swap defaults 0 0" >> /mnt/etc/fstab
+    fi
+    
+    log "$GREEN" "fstab gerado"
+}
+
+# ============================================================================
+# FASE 4: CONFIGURAÇÃO DO SISTEMA (CHROOT)
+# ============================================================================
+
+configure_system() {
+    log "$BLUE" "Configurando sistema..."
+    
+    # Criar script de configuração para chroot
+    cat > /mnt/configure-chroot.sh <<'CHROOT_SCRIPT'
+#!/bin/bash
 
 # Cores
 RED='\033[0;31m'
@@ -15,587 +376,413 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-# Configuração
-SCRIPT_NAME="fase5-config-chroot"
-LOG_DIR="/var/log/arch-secure-setup"
-ENV_FILE="/tmp/arch_setup_vars.env"
-
-# Verificar se está no chroot
-if [[ ! -f /tmp/arch_setup_vars.env ]]; then
-    echo -e "${RED}ERRO: Este script deve ser executado dentro do chroot!${NC}"
-    echo -e "${YELLOW}Use: arch-chroot /mnt${NC}"
-    exit 1
-fi
-
-# Carregar configuração
-source "$ENV_FILE"
-
-# Corrigir CONFIG_FILE se necessário
-if [[ "$NON_INTERACTIVE" == "true" ]] && [[ -f "/tmp/config.json" ]]; then
-    CONFIG_FILE="/tmp/config.json"
-fi
-
-# Setup logging
-setup_logging() {
-    mkdir -p "$LOG_DIR"
-    LOG_FILE="$LOG_DIR/${SCRIPT_NAME}-$(date '+%Y%m%d-%H%M%S').log"
-}
-
 log() {
-    local level="$1"
-    shift
-    echo -e "${level}[$(date '+%Y-%m-%d %H:%M:%S')] $*${NC}" | tee -a "$LOG_FILE"
+    echo -e "${2:-$BLUE}[$(date '+%H:%M:%S')] $1${NC}"
 }
 
-# Verificar comandos necessários
-check_commands() {
-    local cmds=("locale-gen" "mkinitcpio" "grub-install" "grub-mkconfig" "useradd" "systemctl")
-    for cmd in "${cmds[@]}"; do
-        if ! command -v "$cmd" &>/dev/null; then
-            log "$RED" "Comando necessário não encontrado: $cmd"
-            exit 1
-        fi
-    done
-    
-    if [[ "$NON_INTERACTIVE" == "true" ]]; then
-        if ! command -v jq &>/dev/null; then
-            log "$RED" "jq necessário para modo non-interactive!"
-            exit 1
-        fi
-    fi
-}
-
-# Obter configuração
-get_configuration() {
-    if [[ "$NON_INTERACTIVE" == "true" ]]; then
-        if [[ ! -f "$CONFIG_FILE" ]]; then
-            log "$RED" "Arquivo de configuração não encontrado: $CONFIG_FILE"
-            exit 1
-        fi
-        
-        # Validar JSON
-        if ! jq empty "$CONFIG_FILE" 2>/dev/null; then
-            log "$RED" "Arquivo JSON inválido: $CONFIG_FILE"
-            exit 1
-        fi
-        
-        TIMEZONE=$(jq -r '.timezone // "America/Sao_Paulo"' "$CONFIG_FILE")
-        LOCALE=$(jq -r '.locale // "pt_BR.UTF-8"' "$CONFIG_FILE")
-        HOSTNAME=$(jq -r '.hostname' "$CONFIG_FILE")
-        USERNAME=$(jq -r '.username' "$CONFIG_FILE")
-        USER_PASSWORD=$(jq -r '.user_password' "$CONFIG_FILE")
-        ROOT_PASSWORD=$(jq -r '.root_password' "$CONFIG_FILE")
-        ENABLE_SELFDESTRUCT=$(jq -r '.autodestruct_enabled // false' "$CONFIG_FILE")
-        
-        # Validar campos obrigatórios
-        for var in HOSTNAME USERNAME USER_PASSWORD ROOT_PASSWORD; do
-            if [[ -z "${!var}" ]] || [[ "${!var}" == "null" ]]; then
-                log "$RED" "Campo obrigatório ausente ou inválido: $var"
-                exit 1
-            fi
-        done
-    else
-        # Modo interativo
-        echo -e "${BLUE}=== Configuração do Sistema ===${NC}"
-        
-        # Timezone
-        echo -e "${YELLOW}Timezone (ex: America/Sao_Paulo):${NC}"
-        read -r TIMEZONE
-        TIMEZONE="${TIMEZONE:-America/Sao_Paulo}"
-        
-        # Validar timezone
-        if [[ ! -f "/usr/share/zoneinfo/$TIMEZONE" ]]; then
-            log "$RED" "Timezone inválido: $TIMEZONE"
-            log "$YELLOW" "Usando America/Sao_Paulo como padrão"
-            TIMEZONE="America/Sao_Paulo"
-        fi
-        
-        # Locale
-        echo -e "${YELLOW}Locale principal (ex: pt_BR.UTF-8):${NC}"
-        read -r LOCALE
-        LOCALE="${LOCALE:-pt_BR.UTF-8}"
-        
-        # Hostname
-        echo -e "${YELLOW}Nome do computador (hostname):${NC}"
-        read -r HOSTNAME
-        
-        # Validar hostname
-        if [[ ! "$HOSTNAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$ ]]; then
-            log "$RED" "Hostname inválido! Usando 'archlinux'"
-            HOSTNAME="archlinux"
-        fi
-        
-        # Usuário
-        echo -e "${YELLOW}Nome de usuário principal:${NC}"
-        read -r USERNAME
-        
-        # Validar username
-        if [[ ! "$USERNAME" =~ ^[a-z][a-z0-9_-]{0,30}$ ]]; then
-            log "$RED" "Nome de usuário inválido!"
-            exit 1
-        fi
-        
-        # Senha do usuário
-        while true; do
-            echo -e "${YELLOW}Senha para o usuário $USERNAME:${NC}"
-            read -rs USER_PASSWORD
-            echo
-            echo -e "${YELLOW}Confirme a senha:${NC}"
-            read -rs USER_PASSWORD_CONFIRM
-            echo
-            
-            if [[ "$USER_PASSWORD" == "$USER_PASSWORD_CONFIRM" ]]; then
-                if [[ ${#USER_PASSWORD} -lt 6 ]]; then
-                    echo -e "${RED}Senha muito curta! Use pelo menos 6 caracteres.${NC}"
-                else
-                    break
-                fi
-            else
-                echo -e "${RED}As senhas não coincidem!${NC}"
-            fi
-        done
-        
-        # Senha root
-        while true; do
-            echo -e "${YELLOW}Senha para root:${NC}"
-            read -rs ROOT_PASSWORD
-            echo
-            echo -e "${YELLOW}Confirme a senha:${NC}"
-            read -rs ROOT_PASSWORD_CONFIRM
-            echo
-            
-            if [[ "$ROOT_PASSWORD" == "$ROOT_PASSWORD_CONFIRM" ]]; then
-                if [[ ${#ROOT_PASSWORD} -lt 6 ]]; then
-                    echo -e "${RED}Senha muito curta! Use pelo menos 6 caracteres.${NC}"
-                else
-                    break
-                fi
-            else
-                echo -e "${RED}As senhas não coincidem!${NC}"
-            fi
-        done
-        
-        # Autodestruição
-        echo -e "${RED}ATENÇÃO: Recurso de autodestruição${NC}"
-        echo -e "${YELLOW}Habilitar sistema de autodestruição? [s/N]:${NC}"
-        read -r selfdestruct_input
-        if [[ "$selfdestruct_input" =~ ^[Ss]$ ]]; then
-            ENABLE_SELFDESTRUCT=true
-            echo -e "${RED}AVISO: Sistema de autodestruição será habilitado!${NC}"
-            echo -e "${YELLOW}Digite CONFIRM para confirmar:${NC}"
-            read -r confirm
-            if [[ "$confirm" != "CONFIRM" ]]; then
-                ENABLE_SELFDESTRUCT=false
-                log "$YELLOW" "Autodestruição cancelada"
-            fi
-        else
-            ENABLE_SELFDESTRUCT=false
-        fi
-    fi
-}
+# Carregar variáveis
+source /tmp/arch_setup_vars.env
 
 # Configurar timezone
-configure_timezone() {
-    log "$BLUE" "Configurando timezone: $TIMEZONE"
-    
-    if [[ ! -f "/usr/share/zoneinfo/$TIMEZONE" ]]; then
-        log "$YELLOW" "Timezone inválido: $TIMEZONE, usando UTC"
-        TIMEZONE="UTC"
-    fi
-    
-    ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
-    hwclock --systohc
-    
-    log "$GREEN" "Timezone configurado"
-}
+log "Configurando timezone..."
+ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
+hwclock --systohc
 
 # Configurar locale
-configure_locale() {
-    log "$BLUE" "Configurando locale: $LOCALE"
-    
-    # Habilitar locales
-    sed -i "s/^#$LOCALE/$LOCALE/" /etc/locale.gen 2>/dev/null || \
-        echo "$LOCALE UTF-8" >> /etc/locale.gen
-    sed -i "s/^#en_US.UTF-8/en_US.UTF-8/" /etc/locale.gen
-    
-    # Gerar locales
-    locale-gen
-    
-    # Configurar locale padrão
-    echo "LANG=$LOCALE" > /etc/locale.conf
-    
-    # Configurar keymap para console
-    echo "KEYMAP=br-abnt2" > /etc/vconsole.conf
-    
-    log "$GREEN" "Locale configurado"
-}
+log "Configurando locale..."
+echo "$LOCALE UTF-8" >> /etc/locale.gen
+echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
+locale-gen
+echo "LANG=$LOCALE" > /etc/locale.conf
+echo "KEYMAP=$KEYMAP" > /etc/vconsole.conf
 
 # Configurar hostname
-configure_hostname() {
-    log "$BLUE" "Configurando hostname: $HOSTNAME"
-    
-    echo "$HOSTNAME" > /etc/hostname
-    
-    cat > /etc/hosts << HOSTS
+log "Configurando hostname..."
+echo "$HOSTNAME" > /etc/hostname
+cat > /etc/hosts <<EOF
 127.0.0.1   localhost
 ::1         localhost
-127.0.1.1   ${HOSTNAME}.localdomain ${HOSTNAME}
-HOSTS
-    
-    log "$GREEN" "Hostname configurado"
-}
+127.0.1.1   $HOSTNAME.localdomain $HOSTNAME
+EOF
 
 # Configurar mkinitcpio
-configure_mkinitcpio() {
-    log "$BLUE" "Configurando mkinitcpio"
-    
-    # Backup do mkinitcpio.conf original
-    cp /etc/mkinitcpio.conf /etc/mkinitcpio.conf.backup
-    
-    # Hooks básicos
-    HOOKS="base udev autodetect microcode modconf kms keyboard keymap consolefont block encrypt filesystems fsck"
-    
-    # Adicionar hook de autodestruição se habilitado
-    if [[ "$ENABLE_SELFDESTRUCT" == "true" ]]; then
-        # Criar hook de autodestruição
-        create_selfdestruct_hook
-        HOOKS="base udev autodetect microcode modconf kms keyboard keymap consolefont block selfdestruct encrypt filesystems fsck"
-    fi
-    
-    # Atualizar mkinitcpio.conf
-    sed -i "s/^HOOKS=.*/HOOKS=($HOOKS)/" /etc/mkinitcpio.conf
-    
-    # Adicionar módulos necessários
-    sed -i "s/^MODULES=.*/MODULES=(btrfs)/" /etc/mkinitcpio.conf
-    
-    # Adicionar binários necessários para o hook
-    if [[ "$ENABLE_SELFDESTRUCT" == "true" ]]; then
-        sed -i "s/^BINARIES=.*/BINARIES=(cryptsetup dd blkdiscard)/" /etc/mkinitcpio.conf
-    fi
-    
-    # Regenerar initramfs
-    mkinitcpio -P
-    
-    log "$GREEN" "mkinitcpio configurado"
-}
+log "Configurando initramfs..."
+sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block filesystems fsck)/' /etc/mkinitcpio.conf
+mkinitcpio -P
 
-# Criar hook de autodestruição
-create_selfdestruct_hook() {
-    log "$YELLOW" "Criando hook de autodestruição para initramfs"
-    
-    # Criar diretórios se não existirem
-    mkdir -p /etc/initcpio/install /etc/initcpio/hooks
-    
-    # Criar hook install
-    cat > /etc/initcpio/install/selfdestruct << 'HOOKINSTALL'
-#!/bin/bash
+# Instalar e configurar GRUB
+log "Instalando GRUB..."
+if [[ "$BOOT_MODE" == "UEFI" ]]; then
+    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB
+else
+    grub-install --target=i386-pc "$DISK"
+fi
 
-build() {
-    add_binary cryptsetup
-    add_binary dd
-    add_binary blkdiscard
-    add_binary poweroff
-    add_runscript
-}
+# Otimizar GRUB para boot rápido
+cat >> /etc/default/grub <<EOF
 
-help() {
-    cat <<HELPEOF
-This hook provides self-destruct capability in early boot.
-If selfdestruct=1 is passed to kernel cmdline, it will:
-1. Erase LUKS headers
-2. Discard all data on SSDs
-3. Overwrite HDDs with random data
-WARNING: This is IRREVERSIBLE!
-HELPEOF
-}
-HOOKINSTALL
-    
-    # Criar hook runtime - corrigido para usar /bin/ash
-    cat > /etc/initcpio/hooks/selfdestruct << 'HOOKRUNTIME'
-#!/bin/ash
+# Otimizações para boot rápido
+GRUB_TIMEOUT=2
+GRUB_CMDLINE_LINUX_DEFAULT="quiet loglevel=3 nowatchdog modprobe.blacklist=iTCO_wdt"
+GRUB_CMDLINE_LINUX=""
+EOF
 
-run_hook() {
-    # Verificar se selfdestruct foi passado
-    if grep -q "selfdestruct=1" /proc/cmdline; then
-        echo ""
-        echo "====================== WARNING ======================"
-        echo "SELF-DESTRUCT SEQUENCE INITIATED!"
-        echo "ALL DATA WILL BE PERMANENTLY DESTROYED!"
-        echo ""
-        echo "You have 10 seconds to power off the system."
-        echo "====================================================="
-        
-        sleep 10
-        
-        echo "Starting destruction sequence..."
-        
-        # Detectar dispositivos - usar busybox compatible commands
-        for dev in $(ls /dev/nvme* /dev/sd* /dev/mmcblk* 2>/dev/null | grep -E '^/dev/(nvme[0-9]+n[0-9]+|sd[a-z]|mmcblk[0-9]+)$'); do
-            if [ -b "$dev" ]; then
-                echo "Processing $dev..."
-                
-                # Tentar apagar headers LUKS
-                if cryptsetup isLuks "$dev" 2>/dev/null; then
-                    cryptsetup luksErase "$dev" --batch-mode 2>/dev/null || true
-                fi
-                
-                # Tentar discard/trim
-                if blkdiscard -f "$dev" 2>/dev/null; then
-                    echo "  Discard completed on $dev"
-                else
-                    # Fallback para dd
-                    dd if=/dev/zero of="$dev" bs=1M count=100 2>/dev/null || true
-                    echo "  Overwrite completed on $dev"
-                fi
-            fi
-        done
-        
-        echo "Destruction complete. System halted."
-        poweroff -f
-    fi
-}
-HOOKRUNTIME
-    
-    chmod +x /etc/initcpio/install/selfdestruct
-    chmod +x /etc/initcpio/hooks/selfdestruct
-    
-    log "$GREEN" "Hook de autodestruição criado"
-}
-
-# Configurar crypttab
-configure_crypttab() {
-    log "$BLUE" "Configurando /etc/crypttab"
-    
-    cat > /etc/crypttab << CRYPTTAB
-# <name>      <device>                                     <password>    <options>
-CRYPTTAB
-    
-    # Swap criptografado com chave aleatória
-    if [[ -n "${SWAP_UUID:-}" ]] && [[ "$SWAP_UUID" != "PENDING" ]]; then
-        echo "cryptswap   UUID=$SWAP_UUID    /dev/urandom    swap,cipher=aes-xts-plain64,size=512" >> /etc/crypttab
-    elif [[ -n "${SWAP_PART:-}" ]]; then
-        # Tentar obter UUID novamente
-        SWAP_UUID=$(blkid -s UUID -o value "$SWAP_PART" 2>/dev/null || echo "")
-        if [[ -n "$SWAP_UUID" ]]; then
-            echo "cryptswap   UUID=$SWAP_UUID    /dev/urandom    swap,cipher=aes-xts-plain64,size=512" >> /etc/crypttab
-        else
-            log "$YELLOW" "Aviso: Usando device path para swap em vez de UUID"
-            echo "cryptswap   $SWAP_PART    /dev/urandom    swap,cipher=aes-xts-plain64,size=512" >> /etc/crypttab
-        fi
-    fi
-    
-    # Disco auxiliar se existir
-    if [[ -n "${AUX_UUID:-}" ]]; then
-        echo "# Disco auxiliar - entrada manual ou keyfile" >> /etc/crypttab
-        echo "# cryptdata   UUID=$AUX_UUID    none    luks,timeout=10,noauto" >> /etc/crypttab
-    fi
-    
-    log "$GREEN" "crypttab configurado"
-}
-
-# Configurar GRUB
-configure_grub() {
-    log "$BLUE" "Configurando GRUB"
-    
-    # Verificar se ROOT_UUID existe
-    if [[ -z "${ROOT_UUID:-}" ]]; then
-        log "$RED" "ROOT_UUID não definido!"
-        exit 1
-    fi
-    
-    # Backup da configuração original
-    [[ -f /etc/default/grub ]] && cp /etc/default/grub /etc/default/grub.backup
-    
-    # Configurar linha de comando do kernel
-    KERNEL_PARAMS="cryptdevice=UUID=$ROOT_UUID:cryptroot root=/dev/mapper/cryptroot"
-    
-    # Adicionar parâmetros para Btrfs
-    KERNEL_PARAMS="$KERNEL_PARAMS rootflags=subvol=@"
-    
-    # Configurar GRUB
-    cat > /etc/default/grub << GRUBCFG
-GRUB_DEFAULT=0
-GRUB_TIMEOUT=5
-GRUB_DISTRIBUTOR="Arch"
-GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3 quiet"
-GRUB_CMDLINE_LINUX="$KERNEL_PARAMS"
-
-# Preload both GPT and MBR modules so that they are not missed
-GRUB_PRELOAD_MODULES="part_gpt part_msdos"
-
-# Enable cryptodisk
-GRUB_ENABLE_CRYPTODISK=y
-
-# Set gfxmode
-GRUB_GFXMODE=auto
-GRUB_GFXPAYLOAD_LINUX=keep
-
-# Disable os-prober
-GRUB_DISABLE_OS_PROBER=true
-GRUBCFG
-    
-    # Instalar GRUB
-    if [[ "$BOOT_MODE" == "UEFI" ]]; then
-        if [[ ! -d /boot/efi ]]; then
-            log "$RED" "Diretório /boot/efi não existe!"
-            exit 1
-        fi
-        grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB || {
-            log "$RED" "Erro ao instalar GRUB (UEFI)"
-            exit 1
-        }
-    else
-        grub-install --target=i386-pc "$DISCO_PRINCIPAL" || {
-            log "$RED" "Erro ao instalar GRUB (BIOS)"
-            exit 1
-        }
-    fi
-    
-    # Adicionar entrada de autodestruição se habilitado
-    if [[ "$ENABLE_SELFDESTRUCT" == "true" ]]; then
-        mkdir -p /etc/grub.d
-        cat > /etc/grub.d/40_custom << 'GRUBCUSTOM'
-#!/bin/sh
-exec tail -n +3 $0
-
-menuentry "SELF-DESTRUCT - DESTROY ALL DATA" --class warning {
-    insmod gzio
-    insmod part_gpt
-    insmod btrfs
-    insmod ext2
-    echo 'WARNING: This will PERMANENTLY DESTROY ALL DATA!'
-    echo 'Press ESC to cancel or ENTER to continue...'
-    sleep --interruptible 5
-    linux /vmlinuz-linux selfdestruct=1
-    initrd /initramfs-linux.img
-}
-GRUBCUSTOM
-        chmod +x /etc/grub.d/40_custom
-    fi
-    
-    # Gerar configuração
-    grub-mkconfig -o /boot/grub/grub.cfg || {
-        log "$RED" "Erro ao gerar configuração do GRUB"
-        exit 1
-    }
-    
-    log "$GREEN" "GRUB configurado e instalado"
-}
+grub-mkconfig -o /boot/grub/grub.cfg
 
 # Criar usuário
-create_user() {
-    log "$BLUE" "Criando usuário: $USERNAME"
-    
-    # Verificar se usuário já existe
-    if id "$USERNAME" &>/dev/null; then
-        log "$YELLOW" "Usuário $USERNAME já existe"
-    else
-        # Criar usuário
-        useradd -m -G wheel,audio,video,optical,storage -s /bin/bash "$USERNAME"
-        
-        # Criar diretórios do usuário
-        su - "$USERNAME" -c "mkdir -p ~/Documents ~/Downloads ~/Pictures ~/Videos ~/Music"
-    fi
-    
-    # Definir senha
-    echo "$USERNAME:$USER_PASSWORD" | chpasswd
-    
-    # Configurar sudo
-    sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
-    
-    log "$GREEN" "Usuário configurado"
-}
+log "Criando usuário $USERNAME..."
+useradd -m -G wheel,audio,video,optical,storage,power -s /bin/bash "$USERNAME"
+echo "$USERNAME:$USER_PASSWORD" | chpasswd
+echo "root:$ROOT_PASSWORD" | chpasswd
 
-# Definir senha root
-set_root_password() {
-    log "$BLUE" "Definindo senha root"
-    
-    echo "root:$ROOT_PASSWORD" | chpasswd
-    
-    log "$GREEN" "Senha root definida"
-}
+# Configurar sudo
+sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 
-# Ajustar fstab para swap criptografado
-configure_fstab() {
-    log "$BLUE" "Ajustando /etc/fstab para swap criptografado"
-    
-    # Adicionar entrada para swap criptografado se não existir
-    if ! grep -q "/dev/mapper/cryptswap" /etc/fstab; then
-        echo "" >> /etc/fstab
-        echo "# Swap criptografado" >> /etc/fstab
-        echo "/dev/mapper/cryptswap    none    swap    defaults    0 0" >> /etc/fstab
-    fi
-    
-    log "$GREEN" "fstab configurado"
-}
+# Instalar XFCE4 e aplicações
+log "Instalando XFCE4 e aplicações..." "$GREEN"
+pacman -S --noconfirm \
+    xorg xorg-server \
+    xfce4 xfce4-goodies \
+    lightdm lightdm-gtk-greeter lightdm-gtk-greeter-settings \
+    firefox \
+    networkmanager network-manager-applet \
+    pulseaudio pavucontrol \
+    gvfs gvfs-mtp thunar-volman \
+    file-roller \
+    ristretto \
+    mousepad \
+    xfce4-terminal \
+    xfce4-taskmanager \
+    xfce4-power-manager \
+    xfce4-notifyd \
+    xfce4-whiskermenu-plugin \
+    ttf-liberation ttf-dejavu noto-fonts \
+    papirus-icon-theme \
+    htop neofetch \
+    preload
 
-# Habilitar serviços
-enable_services() {
-    log "$BLUE" "Habilitando serviços essenciais"
+# Configurar autologin se solicitado
+if [[ "$AUTOLOGIN" == "true" ]]; then
+    log "Configurando autologin..."
+    groupadd -r autologin
+    gpasswd -a "$USERNAME" autologin
     
-    systemctl enable NetworkManager || log "$YELLOW" "NetworkManager já habilitado"
-    systemctl enable systemd-resolved || log "$YELLOW" "systemd-resolved já habilitado"
-    systemctl enable fstrim.timer || log "$YELLOW" "fstrim.timer já habilitado"
-    systemctl enable systemd-timesyncd || log "$YELLOW" "systemd-timesyncd já habilitado"
-    
-    log "$GREEN" "Serviços habilitados"
-}
+    mkdir -p /etc/lightdm/lightdm.conf.d/
+    cat > /etc/lightdm/lightdm.conf.d/autologin.conf <<EOF
+[Seat:*]
+autologin-user=$USERNAME
+autologin-user-timeout=0
+autologin-session=xfce
+EOF
+fi
 
-# Configuração final
-final_configuration() {
-    log "$BLUE" "Realizando configurações finais"
-    
-    # Criar diretório para montagem do disco auxiliar
-    if [[ -n "${AUX_PART:-}" ]]; then
-        mkdir -p /data
-        chown "$USERNAME:$USERNAME" /data 2>/dev/null || true
-    fi
-    
-    # Ajustar swappiness para SSD
-    echo "vm.swappiness=10" > /etc/sysctl.d/99-swappiness.conf
-    
-    # Configurar journal para limitar tamanho
-    mkdir -p /etc/systemd/journald.conf.d/
-    cat > /etc/systemd/journald.conf.d/00-size-limit.conf << JOURNAL
+# Otimizações do sistema
+log "Aplicando otimizações..." "$YELLOW"
+
+# Swappiness para desktop
+echo "vm.swappiness=10" > /etc/sysctl.d/99-swappiness.conf
+echo "vm.vfs_cache_pressure=50" >> /etc/sysctl.d/99-swappiness.conf
+
+# Limitar journald
+mkdir -p /etc/systemd/journald.conf.d/
+cat > /etc/systemd/journald.conf.d/00-journal-size.conf <<EOF
 [Journal]
 SystemMaxUse=100M
 SystemMaxFileSize=10M
-JOURNAL
-    
-    log "$GREEN" "Configurações finais aplicadas"
-}
-
-# Função principal
-main() {
-    setup_logging
-    
-    log "$BLUE" "=== FASE 5: CONFIGURAÇÃO DO SISTEMA (CHROOT) ==="
-    
-    check_commands
-    get_configuration
-    configure_timezone
-    configure_locale
-    configure_hostname
-    configure_mkinitcpio
-    configure_crypttab
-    configure_fstab
-    configure_grub
-    set_root_password
-    create_user
-    enable_services
-    final_configuration
-    
-    log "$GREEN" "=== FASE 5 CONCLUÍDA COM SUCESSO ==="
-    log "$YELLOW" "Sistema configurado!"
-    log "$YELLOW" "Próximos passos opcionais:"
-    log "$YELLOW" "  ./fase6-backup-scripts.sh - Instalar scripts de backup"
-    log "$YELLOW" "  ./fase7-autodestruicao.sh - Configurar autodestruição adicional"
-    echo
-    log "$BLUE" "Quando terminar, saia do chroot e reinicie:"
-    log "$GREEN" "  exit"
-    log "$GREEN" "  umount -R /mnt"
-    log "$GREEN" "  reboot"
-}
-
-main
+MaxFileSec=1month
 EOF
+
+# Desabilitar serviços desnecessários
+systemctl mask lvm2-monitor.service
+systemctl mask ModemManager.service
+
+# Habilitar serviços essenciais
+log "Habilitando serviços..."
+systemctl enable NetworkManager
+systemctl enable lightdm
+systemctl enable fstrim.timer
+systemctl enable preload
+
+# Configurar XFCE4 para performance
+mkdir -p /etc/skel/.config/xfce4/xfconf/xfce-perchannel-xml/
+cat > /etc/skel/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="use_compositing" type="bool" value="false"/>
+    <property name="box_move" type="bool" value="false"/>
+    <property name="box_resize" type="bool" value="false"/>
+    <property name="scroll_workspaces" type="bool" value="false"/>
+  </property>
+</channel>
+EOF
+
+# Copiar configurações para o usuário
+cp -r /etc/skel/.config /home/$USERNAME/
+chown -R $USERNAME:$USERNAME /home/$USERNAME/.config
+
+log "Configuração concluída!" "$GREEN"
+CHROOT_SCRIPT
+
+    # Exportar variáveis para o chroot
+    cat > /mnt/tmp/arch_setup_vars.env <<EOF
+TIMEZONE="$TIMEZONE"
+LOCALE="$LOCALE"
+KEYMAP="$KEYMAP"
+HOSTNAME="$HOSTNAME"
+USERNAME="$USERNAME"
+USER_PASSWORD="$USER_PASSWORD"
+ROOT_PASSWORD="$ROOT_PASSWORD"
+BOOT_MODE="$BOOT_MODE"
+DISK="$DISK"
+AUTOLOGIN="$AUTOLOGIN"
+EOF
+
+    # Executar configuração no chroot
+    chmod +x /mnt/configure-chroot.sh
+    arch-chroot /mnt /configure-chroot.sh
+    
+    # Limpar
+    rm /mnt/configure-chroot.sh
+    rm /mnt/tmp/arch_setup_vars.env
+    
+    log "$GREEN" "Sistema configurado com sucesso!"
+}
+
+# ============================================================================
+# FASE 5: INSTALAÇÃO DE SOFTWARE ADICIONAL (OPCIONAL)
+# ============================================================================
+
+install_additional_software() {
+    if [[ "$NON_INTERACTIVE" == true ]]; then
+        # Instalar pacotes adicionais do config
+        if command -v jq &>/dev/null; then
+            EXTRA_APPS=$(jq -r '.packages.apps[]?' "$CONFIG_FILE" 2>/dev/null | tr '\n' ' ')
+            MULTIMEDIA=$(jq -r '.packages.multimedia[]?' "$CONFIG_FILE" 2>/dev/null | tr '\n' ' ')
+            
+            if [[ -n "$EXTRA_APPS$MULTIMEDIA" ]]; then
+                log "$BLUE" "Instalando software adicional..."
+                arch-chroot /mnt pacman -S --noconfirm $EXTRA_APPS $MULTIMEDIA
+            fi
+        fi
+    else
+        log "$YELLOW" "Deseja instalar software adicional? [s/N]"
+        read -r install_extra
+        
+        if [[ "$install_extra" =~ ^[Ss]$ ]]; then
+            log "$BLUE" "Categorias disponíveis:"
+            echo "1) Desenvolvimento (vscode, nodejs, docker)"
+            echo "2) Multimídia (vlc, gimp, audacity)"
+            echo "3) Escritório (libreoffice, thunderbird)"
+            echo "4) Jogos (steam, lutris)"
+            echo "5) Todas as anteriores"
+            echo "0) Nenhuma"
+            
+            read -r -p "Escolha [0]: " category
+            category=${category:-0}
+            
+            case $category in
+                1)
+                    arch-chroot /mnt pacman -S --noconfirm code nodejs npm docker docker-compose
+                    arch-chroot /mnt systemctl enable docker
+                    ;;
+                2)
+                    arch-chroot /mnt pacman -S --noconfirm vlc gimp audacity
+                    ;;
+                3)
+                    arch-chroot /mnt pacman -S --noconfirm libreoffice-fresh thunderbird
+                    ;;
+                4)
+                    # Habilitar multilib para Steam
+                    sed -i '/\[multilib\]/,/Include/s/^#//' /mnt/etc/pacman.conf
+                    arch-chroot /mnt pacman -Sy
+                    arch-chroot /mnt pacman -S --noconfirm steam lutris wine
+                    ;;
+                5)
+                    sed -i '/\[multilib\]/,/Include/s/^#//' /mnt/etc/pacman.conf
+                    arch-chroot /mnt pacman -Sy
+                    arch-chroot /mnt pacman -S --noconfirm \
+                        code nodejs npm docker docker-compose \
+                        vlc gimp audacity \
+                        libreoffice-fresh thunderbird \
+                        steam lutris wine
+                    arch-chroot /mnt systemctl enable docker
+                    ;;
+            esac
+        fi
+    fi
+}
+
+# ============================================================================
+# FASE 6: FINALIZAÇÃO
+# ============================================================================
+
+create_post_install_script() {
+    log "$BLUE" "Criando script pós-instalação..."
+    
+    cat > /mnt/home/$USERNAME/post-install.sh <<'POST_SCRIPT'
+#!/bin/bash
+
+# Script de pós-instalação para Arch Linux + XFCE4
+
+echo "=== Script de Pós-Instalação ==="
+echo ""
+echo "1. Atualizando sistema..."
+sudo pacman -Syu --noconfirm
+
+echo ""
+echo "2. Instalando AUR helper (yay)..."
+cd /tmp
+git clone https://aur.archlinux.org/yay.git
+cd yay
+makepkg -si --noconfirm
+cd ~
+rm -rf /tmp/yay
+
+echo ""
+echo "3. Configurações recomendadas:"
+echo "   - Configure o tema do XFCE em Configurações > Aparência"
+echo "   - Configure os atalhos em Configurações > Teclado"
+echo "   - Adicione widgets ao painel conforme necessário"
+echo "   - Configure o Whisker Menu como menu principal"
+
+echo ""
+echo "4. Aplicações recomendadas do AUR:"
+echo "   yay -S brave-bin spotify vscodium-bin"
+
+echo ""
+echo "5. Para melhor performance:"
+echo "   - Desative composição em Configurações > Gerenciador de Janelas > Compositor"
+echo "   - Use temas leves como Greybird ou Arc"
+echo "   - Desative efeitos visuais desnecessários"
+
+echo ""
+echo "Script concluído! Aproveite seu Arch Linux otimizado!"
+POST_SCRIPT
+
+    chmod +x /mnt/home/$USERNAME/post-install.sh
+    arch-chroot /mnt chown $USERNAME:$USERNAME /home/$USERNAME/post-install.sh
+    
+    log "$GREEN" "Script pós-instalação criado em /home/$USERNAME/post-install.sh"
+}
+
+cleanup_and_finish() {
+    log "$BLUE" "Finalizando instalação..."
+    
+    # Desmontar partições
+    umount -R /mnt 2>/dev/null || true
+    
+    # Mensagem final
+    clear
+    echo -e "${GREEN}"
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║           INSTALAÇÃO CONCLUÍDA COM SUCESSO!               ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+    echo ""
+    echo -e "${CYAN}Informações do sistema instalado:${NC}"
+    echo -e "  Hostname: ${GREEN}$HOSTNAME${NC}"
+    echo -e "  Usuário: ${GREEN}$USERNAME${NC}"
+    echo -e "  Desktop: ${GREEN}XFCE4${NC}"
+    echo -e "  Boot: ${GREEN}$BOOT_MODE${NC}"
+    echo ""
+    echo -e "${YELLOW}Próximos passos:${NC}"
+    echo "1. Remova a mídia de instalação"
+    echo "2. Reinicie o sistema: ${GREEN}reboot${NC}"
+    echo "3. Faça login com o usuário: ${GREEN}$USERNAME${NC}"
+    echo "4. Execute o script pós-instalação: ${GREEN}./post-install.sh${NC}"
+    echo ""
+    echo -e "${BLUE}Logs da instalação salvos em: $LOG_DIR${NC}"
+    echo ""
+}
+
+# ============================================================================
+# FUNÇÃO PRINCIPAL
+# ============================================================================
+
+main() {
+    # Preparação
+    print_banner
+    setup_logging
+    check_root
+    check_boot_mode
+    check_internet
+    check_commands
+    
+    log "$MAGENTA" "=== INICIANDO INSTALAÇÃO DO ARCH LINUX + XFCE4 ==="
+    
+    # Fase 1: Configuração
+    select_mode
+    
+    if [[ "$NON_INTERACTIVE" == false ]]; then
+        # Coletar informações no modo interativo
+        echo -e "${YELLOW}Nome do computador (hostname) [$DEFAULT_HOSTNAME]:${NC}"
+        read -r HOSTNAME
+        HOSTNAME=${HOSTNAME:-$DEFAULT_HOSTNAME}
+        
+        echo -e "${YELLOW}Nome de usuário:${NC}"
+        read -r USERNAME
+        
+        echo -e "${YELLOW}Senha do usuário:${NC}"
+        read -rs USER_PASSWORD
+        echo
+        
+        echo -e "${YELLOW}Senha do root:${NC}"
+        read -rs ROOT_PASSWORD
+        echo
+        
+        echo -e "${YELLOW}Timezone [$DEFAULT_TIMEZONE]:${NC}"
+        read -r TIMEZONE
+        TIMEZONE=${TIMEZONE:-$DEFAULT_TIMEZONE}
+        
+        echo -e "${YELLOW}Locale [$DEFAULT_LOCALE]:${NC}"
+        read -r LOCALE
+        LOCALE=${LOCALE:-$DEFAULT_LOCALE}
+        
+        echo -e "${YELLOW}Keymap [$DEFAULT_KEYMAP]:${NC}"
+        read -r KEYMAP
+        KEYMAP=${KEYMAP:-$DEFAULT_KEYMAP}
+        
+        echo -e "${YELLOW}Tamanho do swap (ex: 2G, 0 para não criar) [2G]:${NC}"
+        read -r SWAP_SIZE
+        SWAP_SIZE=${SWAP_SIZE:-2G}
+        
+        echo -e "${YELLOW}Habilitar autologin? [s/N]:${NC}"
+        read -r autologin_choice
+        if [[ "$autologin_choice" =~ ^[Ss]$ ]]; then
+            AUTOLOGIN=true
+        else
+            AUTOLOGIN=false
+        fi
+    fi
+    
+    # Fase 2: Particionamento
+    select_disk
+    partition_disk
+    format_partitions
+    mount_partitions
+    
+    # Fase 3: Instalação base
+    install_base_system
+    generate_fstab
+    
+    # Fase 4: Configuração do sistema
+    configure_system
+    
+    # Fase 5: Software adicional
+    install_additional_software
+    
+    # Fase 6: Finalização
+    create_post_install_script
+    cleanup_and_finish
+}
+
+# ============================================================================
+# EXECUÇÃO
+# ============================================================================
+
+# Tratamento de erros
+trap 'log "$RED" "Erro na linha $LINENO. Instalação abortada."; exit 1' ERR
+
+# Executar instalação
+main "$@"
