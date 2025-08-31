@@ -1,8 +1,6 @@
-
 # ============================================================================
-# FASE 3 - DISCO AUXILIAR
+# FASE 3 - DISCO AUXILIAR (CORRIGIDA)
 # ============================================================================
-echo -e "${GREEN}Criando fase3-disco-auxiliar.sh...${NC}"
 cat << 'EOF' > fase3-disco-auxiliar.sh
 #!/bin/bash
 # fase3-disco-auxiliar.sh - Configuração do disco auxiliar (opcional)
@@ -34,13 +32,42 @@ log() {
     echo -e "${level}[$(date '+%Y-%m-%d %H:%M:%S')] $*${NC}" | tee -a "$LOG_FILE"
 }
 
+check_commands() {
+    local cmds=("cryptsetup" "parted" "wipefs" "partprobe" "blkid")
+    for cmd in "${cmds[@]}"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            log "$RED" "Comando necessário não encontrado: $cmd"
+            exit 1
+        fi
+    done
+    
+    if [[ "$NON_INTERACTIVE" == "true" ]]; then
+        if ! command -v jq &>/dev/null; then
+            log "$RED" "jq necessário para modo non-interactive!"
+            exit 1
+        fi
+    fi
+}
+
 main() {
     setup_logging
     log "$BLUE" "=== FASE 3: DISCO AUXILIAR ==="
     
+    check_commands
+    
     if [[ "$NON_INTERACTIVE" == "true" ]]; then
+        if [[ ! -f "$CONFIG_FILE" ]]; then
+            log "$RED" "Arquivo de configuração não encontrado: $CONFIG_FILE"
+            exit 1
+        fi
+        
         LUKS_AUX_PASSWORD=$(jq -r '.luks_aux_password' "$CONFIG_FILE")
         LINUX_ONLY=$(jq -r '.linux_only // false' "$CONFIG_FILE")
+        
+        if [[ -z "$LUKS_AUX_PASSWORD" ]] || [[ "$LUKS_AUX_PASSWORD" == "null" ]]; then
+            log "$RED" "Senha LUKS auxiliar não encontrada no arquivo de configuração!"
+            exit 1
+        fi
     else
         echo -e "${YELLOW}Senha LUKS para disco auxiliar:${NC}"
         read -rs LUKS_AUX_PASSWORD
@@ -62,9 +89,21 @@ main() {
     # Particionar
     wipefs -af "$DISCO_AUXILIAR"
     parted -s "$DISCO_AUXILIAR" mklabel gpt mkpart DATA 0% 100%
+    sleep 1
+    partprobe "$DISCO_AUXILIAR"
     
-    AUX_PART="${DISCO_AUXILIAR}1"
-    [[ "$DISCO_AUXILIAR" =~ nvme ]] && AUX_PART="${DISCO_AUXILIAR}p1"
+    # Detectar partição corretamente
+    if [[ "$DISCO_AUXILIAR" =~ nvme|mmcblk|loop ]]; then
+        AUX_PART="${DISCO_AUXILIAR}p1"
+    else
+        AUX_PART="${DISCO_AUXILIAR}1"
+    fi
+    
+    # Verificar se partição foi criada
+    if [[ ! -b "$AUX_PART" ]]; then
+        log "$RED" "Erro: Partição $AUX_PART não foi criada!"
+        exit 1
+    fi
     
     # LUKS
     echo -n "$LUKS_AUX_PASSWORD" | cryptsetup luksFormat \
@@ -72,15 +111,28 @@ main() {
         --pbkdf argon2id \
         --iter-time 3000 \
         --pbkdf-memory 262144 \
+        --batch-mode \
         "$AUX_PART" -
     
     echo -n "$LUKS_AUX_PASSWORD" | cryptsetup open "$AUX_PART" cryptdata -
     
     # Formatar
     if [[ "$LINUX_ONLY" == "true" ]]; then
-        mkfs.ext4 -L DATA /dev/mapper/cryptdata
+        if command -v mkfs.ext4 &>/dev/null; then
+            mkfs.ext4 -L DATA /dev/mapper/cryptdata
+        else
+            log "$RED" "mkfs.ext4 não encontrado!"
+            exit 1
+        fi
     else
-        mkfs.exfat -n DATA /dev/mapper/cryptdata
+        if command -v mkfs.exfat &>/dev/null; then
+            mkfs.exfat -n DATA /dev/mapper/cryptdata
+        elif command -v mkexfatfs &>/dev/null; then
+            mkexfatfs -n DATA /dev/mapper/cryptdata
+        else
+            log "$RED" "mkfs.exfat não encontrado! Instale exfatprogs ou exfat-utils"
+            exit 1
+        fi
     fi
     
     AUX_UUID=$(blkid -s UUID -o value "$AUX_PART")
