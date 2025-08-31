@@ -1,7 +1,7 @@
 # ============================================================================
-# FASE 5 - CONFIG CHROOT (CORRIGIDA E COMPLETA)
+# FASE 5 - CONFIG CHROOT (CORRIGIDA)
 # ============================================================================
-cat << 'EOF_FASE5' > fase5-config-chroot.sh
+cat << 'EOF' > fase5-config-chroot.sh
 #!/bin/bash
 # fase5-config-chroot.sh - Configuração do sistema dentro do chroot
 # EXECUTE ESTE SCRIPT DENTRO DO CHROOT!
@@ -106,7 +106,8 @@ get_configuration() {
         # Validar timezone
         if [[ ! -f "/usr/share/zoneinfo/$TIMEZONE" ]]; then
             log "$RED" "Timezone inválido: $TIMEZONE"
-            exit 1
+            log "$YELLOW" "Usando America/Sao_Paulo como padrão"
+            TIMEZONE="America/Sao_Paulo"
         fi
         
         # Locale
@@ -120,8 +121,8 @@ get_configuration() {
         
         # Validar hostname
         if [[ ! "$HOSTNAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$ ]]; then
-            log "$RED" "Hostname inválido!"
-            exit 1
+            log "$RED" "Hostname inválido! Usando 'archlinux'"
+            HOSTNAME="archlinux"
         fi
         
         # Usuário
@@ -198,8 +199,8 @@ configure_timezone() {
     log "$BLUE" "Configurando timezone: $TIMEZONE"
     
     if [[ ! -f "/usr/share/zoneinfo/$TIMEZONE" ]]; then
-        log "$RED" "Timezone inválido: $TIMEZONE"
-        exit 1
+        log "$YELLOW" "Timezone inválido: $TIMEZONE, usando UTC"
+        TIMEZONE="UTC"
     fi
     
     ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
@@ -309,9 +310,9 @@ HELPEOF
 }
 HOOKINSTALL
     
-    # Criar hook runtime
+    # Criar hook runtime - corrigido para usar /bin/ash
     cat > /etc/initcpio/hooks/selfdestruct << 'HOOKRUNTIME'
-#!/usr/bin/ash
+#!/bin/ash
 
 run_hook() {
     # Verificar se selfdestruct foi passado
@@ -373,8 +374,14 @@ CRYPTTAB
     if [[ -n "${SWAP_UUID:-}" ]] && [[ "$SWAP_UUID" != "PENDING" ]]; then
         echo "cryptswap   UUID=$SWAP_UUID    /dev/urandom    swap,cipher=aes-xts-plain64,size=512" >> /etc/crypttab
     elif [[ -n "${SWAP_PART:-}" ]]; then
-        log "$YELLOW" "Aviso: Usando device path para swap em vez de UUID"
-        echo "cryptswap   $SWAP_PART    /dev/urandom    swap,cipher=aes-xts-plain64,size=512" >> /etc/crypttab
+        # Tentar obter UUID novamente
+        SWAP_UUID=$(blkid -s UUID -o value "$SWAP_PART" 2>/dev/null || echo "")
+        if [[ -n "$SWAP_UUID" ]]; then
+            echo "cryptswap   UUID=$SWAP_UUID    /dev/urandom    swap,cipher=aes-xts-plain64,size=512" >> /etc/crypttab
+        else
+            log "$YELLOW" "Aviso: Usando device path para swap em vez de UUID"
+            echo "cryptswap   $SWAP_PART    /dev/urandom    swap,cipher=aes-xts-plain64,size=512" >> /etc/crypttab
+        fi
     fi
     
     # Disco auxiliar se existir
@@ -591,4 +598,4 @@ main() {
 }
 
 main
-EOF_FASE5
+EOF
