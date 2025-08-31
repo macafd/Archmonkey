@@ -1,9 +1,7 @@
 # ============================================================================
 # FILE: fase6-backup-scripts.sh
 # ============================================================================
-cat << 'EOF_FASE6' > fase6-backup-scripts.sh
 #!/bin/bash
-# fase6-backup-scripts.sh - Instalação de scripts de backup para headers LUKS
 # EXECUTE DENTRO DO CHROOT
 
 set -euo pipefail
@@ -37,6 +35,32 @@ log() {
     local level="$1"
     shift
     echo -e "${level}[$(date '+%Y-%m-%d %H:%M:%S')] $*${NC}" | tee -a "$LOG_FILE"
+}
+
+# Verificar comandos necessários
+check_commands() {
+    local cmds=("gpg" "tar" "cryptsetup" "blkid" "mktemp" "find")
+    local missing=()
+    
+    for cmd in "${cmds[@]}"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            missing+=("$cmd")
+        fi
+    done
+    
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log "$RED" "Comandos necessários não encontrados: ${missing[*]}"
+        log "$YELLOW" "Instale com: pacman -S gnupg tar cryptsetup util-linux coreutils findutils"
+        exit 1
+    fi
+    
+    # Verificar jq se modo non-interactive
+    if [[ "${NON_INTERACTIVE:-false}" == "true" ]]; then
+        if ! command -v jq &>/dev/null; then
+            log "$RED" "jq necessário para modo non-interactive!"
+            exit 1
+        fi
+    fi
 }
 
 # Criar script de backup
@@ -74,6 +98,14 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# Verificar comandos necessários
+for cmd in gpg tar cryptsetup blkid mktemp find mount umount sync; do
+    if ! command -v "$cmd" &>/dev/null; then
+        log "$RED" "ERRO: Comando necessário não encontrado: $cmd"
+        exit 1
+    fi
+done
+
 # Criar diretório de backup
 mkdir -p "$BACKUP_DIR"
 cd "$BACKUP_DIR"
@@ -86,8 +118,16 @@ log "$BLUE" "Iniciando backup de headers LUKS"
 
 # Detectar dispositivos LUKS
 LUKS_DEVICES=()
-for dev in $(lsblk -rno NAME,TYPE | awk '$2=="part" {print "/dev/"$1}'); do
-    if cryptsetup isLuks "$dev" 2>/dev/null; then
+for dev in $(lsblk -rno NAME,TYPE | awk '$2=="part" {print "/dev/"$1}' | sort -u); do
+    if [[ -b "$dev" ]] && cryptsetup isLuks "$dev" 2>/dev/null; then
+        LUKS_DEVICES+=("$dev")
+        log "$GREEN" "Dispositivo LUKS detectado: $dev"
+    fi
+done
+
+# Verificar também dispositivos de disco completos (para casos especiais)
+for dev in $(lsblk -rno NAME,TYPE | awk '$2=="disk" {print "/dev/"$1}' | sort -u); do
+    if [[ -b "$dev" ]] && cryptsetup isLuks "$dev" 2>/dev/null; then
         LUKS_DEVICES+=("$dev")
         log "$GREEN" "Dispositivo LUKS detectado: $dev"
     fi
@@ -104,59 +144,86 @@ for device in "${LUKS_DEVICES[@]}"; do
     header_file="${TEMP_DIR}/header${device_name}.img"
     
     log "$BLUE" "Fazendo backup de $device"
-    cryptsetup luksHeaderBackup "$device" --header-backup-file "$header_file"
+    if ! cryptsetup luksHeaderBackup "$device" --header-backup-file "$header_file"; then
+        log "$RED" "ERRO ao fazer backup de $device"
+        continue
+    fi
     
     # Adicionar informações do dispositivo
-    echo "Device: $device" > "${header_file}.info"
-    echo "Date: $(date)" >> "${header_file}.info"
-    echo "UUID: $(blkid -s UUID -o value $device)" >> "${header_file}.info"
-    cryptsetup luksDump "$device" >> "${header_file}.info" 2>/dev/null || true
+    {
+        echo "Device: $device"
+        echo "Date: $(date)"
+        echo "UUID: $(blkid -s UUID -o value $device 2>/dev/null || echo 'N/A')"
+        echo "---"
+        cryptsetup luksDump "$device" 2>/dev/null || echo "luksDump failed"
+    } > "${header_file}.info"
 done
+
+# Verificar se algum backup foi criado
+if [[ $(find "$TEMP_DIR" -name "header*.img" -type f | wc -l) -eq 0 ]]; then
+    log "$RED" "ERRO: Nenhum backup de header foi criado"
+    exit 1
+fi
 
 # Criar arquivo tar
 log "$BLUE" "Criando arquivo tar"
-tar -czf "${TEMP_DIR}/${BACKUP_NAME}.tar.gz" -C "$TEMP_DIR" .
+cd "$TEMP_DIR"
+if ! tar -czf "${BACKUP_NAME}.tar.gz" header*.img header*.info 2>/dev/null; then
+    log "$RED" "ERRO ao criar arquivo tar"
+    exit 1
+fi
+cd - > /dev/null
 
 # Criptografar com GPG
 log "$BLUE" "Criptografando backup"
 echo -e "${YELLOW}Digite a senha para criptografar o backup:${NC}"
-gpg -c --cipher-algo AES256 --compress-algo none \
+
+# Usar --batch com passphrase via stdin para melhor controle
+if ! gpg --batch --yes -c \
+    --cipher-algo AES256 \
+    --compress-algo none \
+    --passphrase-fd 0 \
     -o "${BACKUP_NAME}.tar.gz.gpg" \
-    "${TEMP_DIR}/${BACKUP_NAME}.tar.gz"
+    "${TEMP_DIR}/${BACKUP_NAME}.tar.gz"; then
+    log "$RED" "ERRO ao criptografar backup"
+    exit 1
+fi
 
 # Copiar para USB se especificado
 if [[ -n "$USB_DEVICE" ]]; then
-    if [[ -b "$USB_DEVICE" ]]; then
+    if [[ ! -b "$USB_DEVICE" ]]; then
+        log "$RED" "ERRO: $USB_DEVICE não é um dispositivo de bloco válido"
+    else
         log "$BLUE" "Copiando backup para $USB_DEVICE"
         
         # Montar USB temporariamente
         USB_MOUNT=$(mktemp -d)
-        mount "$USB_DEVICE" "$USB_MOUNT" || {
+        
+        if mount "$USB_DEVICE" "$USB_MOUNT" 2>/dev/null; then
+            # Criar diretório de backups no USB
+            mkdir -p "${USB_MOUNT}/luks-backups"
+            
+            # Copiar backup
+            if cp "${BACKUP_NAME}.tar.gz.gpg" "${USB_MOUNT}/luks-backups/"; then
+                log "$GREEN" "Backup copiado para USB"
+            else
+                log "$RED" "ERRO ao copiar backup para USB"
+            fi
+            
+            # Sincronizar e desmontar
+            sync
+            umount "$USB_MOUNT" 2>/dev/null || true
+        else
             log "$RED" "ERRO: Não foi possível montar $USB_DEVICE"
-            rmdir "$USB_MOUNT"
-            exit 1
-        }
+        fi
         
-        # Criar diretório de backups no USB
-        mkdir -p "${USB_MOUNT}/luks-backups"
-        
-        # Copiar backup
-        cp "${BACKUP_NAME}.tar.gz.gpg" "${USB_MOUNT}/luks-backups/"
-        
-        # Sincronizar e desmontar
-        sync
-        umount "$USB_MOUNT"
-        rmdir "$USB_MOUNT"
-        
-        log "$GREEN" "Backup copiado para USB"
-    else
-        log "$RED" "ERRO: $USB_DEVICE não é um dispositivo válido"
+        rmdir "$USB_MOUNT" 2>/dev/null || true
     fi
 fi
 
 # Limpar backups antigos
 log "$BLUE" "Removendo backups antigos (mais de $RETENTION_DAYS dias)"
-find "$BACKUP_DIR" -name "luks-headers-*.tar.gz.gpg" -mtime +$RETENTION_DAYS -delete
+find "$BACKUP_DIR" -name "luks-headers-*.tar.gz.gpg" -mtime +$RETENTION_DAYS -delete 2>/dev/null || true
 
 log "$GREEN" "Backup concluído: ${BACKUP_NAME}.tar.gz.gpg"
 log "$YELLOW" "IMPORTANTE: Guarde este backup em local seguro!"
@@ -183,6 +250,8 @@ Type=oneshot
 ExecStart=$BACKUP_SCRIPT
 StandardOutput=journal
 StandardError=journal
+User=root
+Environment="RETENTION_DAYS=7"
 EOF
     
     # Criar timer
@@ -207,38 +276,53 @@ EOF
 run_first_backup() {
     log "$BLUE" "Executando primeiro backup"
     
-    if [[ "$NON_INTERACTIVE" == "true" ]]; then
-        USB_BACKUP=$(jq -r '.usb_backup // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+    # Determinar se fazer backup em USB
+    local USB_BACKUP=""
+    
+    if [[ "${NON_INTERACTIVE:-false}" == "true" ]]; then
+        if [[ -f "$CONFIG_FILE" ]]; then
+            USB_BACKUP=$(jq -r '.usb_backup // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+        fi
     else
         echo -e "${YELLOW}Deseja fazer backup em um dispositivo USB? [s/N]:${NC}"
         read -r usb_input
         if [[ "$usb_input" =~ ^[Ss]$ ]]; then
+            # Listar dispositivos removíveis
+            echo -e "${BLUE}Dispositivos disponíveis:${NC}"
+            lsblk -o NAME,SIZE,TYPE,MOUNTPOINT | grep -E "disk|part"
+            
             echo -e "${YELLOW}Digite o dispositivo USB (ex: /dev/sdb1):${NC}"
             read -r USB_BACKUP
-        else
-            USB_BACKUP=""
+            
+            # Validar dispositivo
+            if [[ -n "$USB_BACKUP" ]] && [[ ! -b "$USB_BACKUP" ]]; then
+                log "$RED" "Dispositivo inválido: $USB_BACKUP"
+                USB_BACKUP=""
+            fi
         fi
     fi
     
     # Executar backup
     if [[ -n "$USB_BACKUP" ]]; then
-        "$BACKUP_SCRIPT" "$USB_BACKUP"
+        "$BACKUP_SCRIPT" "$USB_BACKUP" || log "$YELLOW" "Backup executado com avisos"
     else
-        "$BACKUP_SCRIPT"
+        "$BACKUP_SCRIPT" || log "$YELLOW" "Backup executado com avisos"
     fi
 }
 
 # Habilitar timer
 enable_timer() {
-    if [[ "$NON_INTERACTIVE" == "true" ]]; then
-        ENABLE_TIMER=$(jq -r '.enable_backup_timer // false' "$CONFIG_FILE" 2>/dev/null || echo "false")
+    local ENABLE_TIMER=false
+    
+    if [[ "${NON_INTERACTIVE:-false}" == "true" ]]; then
+        if [[ -f "$CONFIG_FILE" ]]; then
+            ENABLE_TIMER=$(jq -r '.enable_backup_timer // false' "$CONFIG_FILE" 2>/dev/null || echo "false")
+        fi
     else
         echo -e "${YELLOW}Habilitar backup semanal automático? [s/N]:${NC}"
         read -r timer_input
         if [[ "$timer_input" =~ ^[Ss]$ ]]; then
             ENABLE_TIMER=true
-        else
-            ENABLE_TIMER=false
         fi
     fi
     
@@ -259,6 +343,14 @@ main() {
     
     log "$BLUE" "=== FASE 6: INSTALAÇÃO DE SCRIPTS DE BACKUP ==="
     
+    # Verificar se está no chroot
+    if [[ ! -d /boot ]] || [[ ! -d /etc ]]; then
+        log "$RED" "ERRO: Este script deve ser executado dentro do chroot!"
+        log "$YELLOW" "Use: arch-chroot /mnt"
+        exit 1
+    fi
+    
+    check_commands
     create_backup_script
     create_systemd_service
     run_first_backup
@@ -267,7 +359,7 @@ main() {
     log "$GREEN" "=== FASE 6 CONCLUÍDA ==="
     log "$YELLOW" "Script de backup instalado em: $BACKUP_SCRIPT"
     log "$YELLOW" "Backups salvos em: $BACKUP_DIR"
+    log "$YELLOW" "Para backup manual: $BACKUP_SCRIPT [/dev/usbX]"
 }
 
-main
-EOF_FASE6
+main "$@"
