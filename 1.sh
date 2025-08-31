@@ -1,7 +1,12 @@
 #!/bin/bash
-# generate-arch-secure-setup-corrigido.sh
-# Script gerador do pacote completo Arch Secure Setup - VERSÃO TOTALMENTE CORRIGIDA
-# Execute este script para criar todos os arquivos necessários com correções aplicadas
+# generate-arch-secure-setup-FIXED.sh
+# Script gerador do pacote Arch Secure Setup - VERSÃO CORRIGIDA
+# Correções aplicadas:
+# - UUID do swap corrigido
+# - Verificação de comandos melhorada
+# - CONFIG_FILE propagado corretamente
+# - Tratamento de erros aprimorado
+# - Verificações de segurança adicionadas
 
 set -euo pipefail
 
@@ -14,19 +19,6 @@ NC='\033[0m'
 
 echo -e "${BLUE}=== Gerando Arch Secure Setup (Versão Corrigida) ===${NC}"
 
-# Verificar dependências básicas
-check_dependencies() {
-    local deps=("tar" "cat" "chmod")
-    for dep in "${deps[@]}"; do
-        if ! command -v "$dep" &> /dev/null; then
-            echo -e "${RED}Erro: $dep não encontrado!${NC}"
-            exit 1
-        fi
-    done
-}
-
-check_dependencies
-
 # Criar diretório
 mkdir -p arch-secure-setup
 cd arch-secure-setup
@@ -34,7 +26,6 @@ cd arch-secure-setup
 # ============================================================================
 # FASE 1 - PREPARO (CORRIGIDA)
 # ============================================================================
-echo -e "${GREEN}Criando fase1-preparo.sh...${NC}"
 cat << 'EOF' > fase1-preparo.sh
 #!/bin/bash
 # fase1-preparo.sh - Detecção de hardware e preparação inicial
@@ -51,7 +42,7 @@ NC='\033[0m'
 SCRIPT_NAME="fase1-preparo"
 LOG_DIR="/var/log/arch-secure-setup"
 ENV_FILE="/tmp/arch_setup_vars.env"
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 # Variáveis globais
 DRY_RUN=false
@@ -64,7 +55,13 @@ parse_args() {
         case $1 in
             --dry-run) DRY_RUN=true; shift ;;
             --simulate) SIMULATE=true; shift ;;
-            --non-interactive) NON_INTERACTIVE=true; CONFIG_FILE="${2:-config.json}"; shift 2 ;;
+            --non-interactive) 
+                NON_INTERACTIVE=true
+                CONFIG_FILE="${2:-config.json}"
+                # Converter para caminho absoluto
+                CONFIG_FILE="$(realpath "$CONFIG_FILE" 2>/dev/null || echo "$CONFIG_FILE")"
+                shift 2 
+                ;;
             --help) show_help; exit 0 ;;
             *) echo -e "${RED}Argumento desconhecido: $1${NC}"; exit 1 ;;
         esac
@@ -84,7 +81,7 @@ HELP
 }
 
 check_commands() {
-    local cmds=("lsblk" "free" "nproc")
+    local cmds=("lsblk" "free" "nproc" "realpath")
     for cmd in "${cmds[@]}"; do
         if ! command -v "$cmd" &>/dev/null; then
             log "$RED" "Comando necessário não encontrado: $cmd"
@@ -92,10 +89,10 @@ check_commands() {
         fi
     done
     
-    # jq apenas se modo non-interactive
     if [[ "$NON_INTERACTIVE" == "true" ]]; then
         if ! command -v "jq" &>/dev/null; then
             log "$RED" "jq necessário para modo non-interactive!"
+            log "$YELLOW" "Instale com: pacman -S jq"
             exit 1
         fi
     fi
@@ -151,6 +148,12 @@ validate_config_file() {
             exit 1
         fi
         
+        # Validar JSON
+        if ! jq empty "$CONFIG_FILE" 2>/dev/null; then
+            log "$RED" "Arquivo JSON inválido: $CONFIG_FILE"
+            exit 1
+        fi
+        
         # Validar campos obrigatórios
         local required_fields=("disco_principal" "hostname" "username")
         for field in "${required_fields[@]}"; do
@@ -168,15 +171,17 @@ select_disks() {
         DISCO_PRINCIPAL=$(jq -r '.disco_principal' "$CONFIG_FILE")
         DISCO_AUXILIAR=$(jq -r '.disco_auxiliar // ""' "$CONFIG_FILE")
         
-        # Validar que os discos existem
-        if [[ ! -b "$DISCO_PRINCIPAL" ]]; then
-            log "$RED" "Disco principal não existe: $DISCO_PRINCIPAL"
-            exit 1
-        fi
-        
-        if [[ -n "$DISCO_AUXILIAR" && ! -b "$DISCO_AUXILIAR" ]]; then
-            log "$RED" "Disco auxiliar não existe: $DISCO_AUXILIAR"
-            exit 1
+        # Validar que os discos existem (exceto em modo simulate)
+        if [[ "$SIMULATE" != "true" ]]; then
+            if [[ ! -b "$DISCO_PRINCIPAL" ]]; then
+                log "$RED" "Disco principal não existe: $DISCO_PRINCIPAL"
+                exit 1
+            fi
+            
+            if [[ -n "$DISCO_AUXILIAR" && ! -b "$DISCO_AUXILIAR" ]]; then
+                log "$RED" "Disco auxiliar não existe: $DISCO_AUXILIAR"
+                exit 1
+            fi
         fi
     else
         echo -e "${YELLOW}Discos disponíveis:${NC}"
