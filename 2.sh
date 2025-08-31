@@ -1,7 +1,6 @@
 # ============================================================================
 # FASE 2 - DISCO PRINCIPAL (CORRIGIDA)
 # ============================================================================
-echo -e "${GREEN}Criando fase2-disco-principal.sh...${NC}"
 cat << 'EOF' > fase2-disco-principal.sh
 #!/bin/bash
 # fase2-disco-principal.sh - Particionamento e criptografia do disco principal
@@ -32,14 +31,19 @@ log() {
 }
 
 check_commands() {
-    local cmds=("cryptsetup" "parted" "mkfs.btrfs" "mkfs.ext4" "mkfs.vfat" "btrfs" "blkid")
+    local cmds=("cryptsetup" "parted" "mkfs.btrfs" "mkfs.ext4" "mkfs.vfat" "btrfs" "blkid" "wipefs" "partprobe" "mkswap")
     for cmd in "${cmds[@]}"; do
         if ! command -v "$cmd" &>/dev/null; then
             log "$RED" "Comando necessário não encontrado: $cmd"
-            log "$YELLOW" "Instale com: pacman -S cryptsetup parted btrfs-progs dosfstools"
+            log "$YELLOW" "Instale com: pacman -S cryptsetup parted btrfs-progs dosfstools util-linux"
             exit 1
         fi
     done
+    
+    # sgdisk é opcional mas útil
+    if ! command -v "sgdisk" &>/dev/null; then
+        log "$YELLOW" "sgdisk não encontrado, usando métodos alternativos"
+    fi
 }
 
 get_configuration() {
@@ -48,6 +52,12 @@ get_configuration() {
             log "$RED" "jq necessário para modo non-interactive!"
             exit 1
         fi
+        
+        if [[ ! -f "$CONFIG_FILE" ]]; then
+            log "$RED" "Arquivo de configuração não encontrado: $CONFIG_FILE"
+            exit 1
+        fi
+        
         SWAPSIZE_GiB=$(jq -r '.swap_gib // 8' "$CONFIG_FILE")
         LUKS_PASSWORD=$(jq -r '.luks_root_password' "$CONFIG_FILE")
         
@@ -99,7 +109,14 @@ partition_disk() {
     # Limpar disco com segurança
     log "$YELLOW" "Limpando disco..."
     wipefs -af "$DISCO_PRINCIPAL" 2>/dev/null || true
-    sgdisk -Z "$DISCO_PRINCIPAL" 2>/dev/null || true
+    
+    # Usar sgdisk se disponível, senão usar dd
+    if command -v sgdisk &>/dev/null; then
+        sgdisk -Z "$DISCO_PRINCIPAL" 2>/dev/null || true
+    else
+        dd if=/dev/zero of="$DISCO_PRINCIPAL" bs=512 count=2048 2>/dev/null || true
+    fi
+    
     partprobe "$DISCO_PRINCIPAL" 2>/dev/null || true
     sleep 1
     
@@ -126,7 +143,7 @@ partition_disk() {
     partprobe "$DISCO_PRINCIPAL"
     
     # Detectar partições corretamente
-    if [[ "$DISCO_PRINCIPAL" =~ nvme|mmcblk ]]; then
+    if [[ "$DISCO_PRINCIPAL" =~ nvme|mmcblk|loop ]]; then
         PART_PREFIX="${DISCO_PRINCIPAL}p"
     else
         PART_PREFIX="${DISCO_PRINCIPAL}"
@@ -182,9 +199,8 @@ create_luks() {
     echo -n "$LUKS_PASSWORD" | cryptsetup open "$ROOT_PART" cryptroot - || \
         { log "$RED" "Erro ao abrir volume LUKS!"; exit 1; }
     
-    # Obter UUIDs
+    # Obter UUID do root LUKS
     ROOT_UUID=$(blkid -s UUID -o value "$ROOT_PART")
-    SWAP_UUID=$(blkid -s UUID -o value "$SWAP_PART")
     
     if [[ -z "$ROOT_UUID" ]]; then
         log "$RED" "Erro ao obter UUID do root!"
@@ -208,6 +224,18 @@ create_filesystems() {
     # Boot
     log "$BLUE" "Formatando /boot..."
     mkfs.ext4 -L BOOT "$BOOT_PART" || { log "$RED" "Erro ao formatar boot!"; exit 1; }
+    
+    # Swap - IMPORTANTE: criar filesystem de swap antes de obter UUID
+    log "$BLUE" "Formatando swap..."
+    mkswap -L SWAP "$SWAP_PART" || { log "$RED" "Erro ao formatar swap!"; exit 1; }
+    
+    # Obter UUID do swap APÓS criar o filesystem
+    SWAP_UUID=$(blkid -s UUID -o value "$SWAP_PART")
+    
+    if [[ -z "$SWAP_UUID" ]]; then
+        log "$YELLOW" "Aviso: Não foi possível obter UUID do swap"
+        SWAP_UUID="PENDING"
+    fi
     
     # Root (Btrfs)
     log "$BLUE" "Formatando root com Btrfs..."
