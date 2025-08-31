@@ -1,8 +1,17 @@
-# ============================================================================
-# CONFIG EXAMPLE 
-# ============================================================================
+#!/bin/bash
+# generate-config.sh - Gera arquivo de configuração exemplo
+set -euo pipefail
+
+# Cores
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
 echo -e "${GREEN}Criando config.example.json...${NC}"
-cat << 'EOF' > config.example.json
+
+cat << 'CONFIG_EOF' > config.example.json
 {
   "disco_principal": "/dev/nvme0n1",
   "disco_auxiliar": "/dev/sda",
@@ -27,4 +36,7 @@ cat << 'EOF' > config.example.json
   "autodestruct_enabled": false,
   "simulate": false
 }
-EOF
+CONFIG_EOF
+
+echo -e "${GREEN}Arquivo config.example.json criado com sucesso!${NC}"
+echo -e "${YELLOW}IMPORTANTE: Edite o arquivo e altere todas as senhas antes de usar!${NC}"
