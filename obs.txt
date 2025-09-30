@@ -1,3 +1,9 @@
 editar arquivos e reconfiguração
 1
 2
+4 reconfigura o processo de criptografia se possível para auto desempenho 
+reconhecimento do sistema de forma atomatica 
+
+além de reconfigurar assinaturas 512 sha 
+airgon d 2 
+e o aes 512 
